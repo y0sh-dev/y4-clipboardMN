@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::core::constants::{DB_DIR_NAME, DB_FILE_NAME};
-
-pub use self::constants::get_socket_path;
+use crate::core::constants::{DB_DIR_NAME, DB_FILE_NAME, SOCKET_FILE_NAME};
 
 pub static SIG_EXIT: AtomicBool = AtomicBool::new(false);
 
@@ -44,25 +42,61 @@ pub fn get_db_path() -> PathBuf {
 }
 
 /// Securely resolve the cache directory for binary payloads.
-pub fn get_cache_dir() -> std::path::PathBuf {
+pub fn get_cache_dir() -> PathBuf {
     let mut path = if let Ok(xdg_cache) = std::env::var("XDG_CACHE_HOME") {
-        std::path::PathBuf::from(xdg_cache)
+        PathBuf::from(xdg_cache)
     } else if let Ok(home) = std::env::var("HOME") {
-        let mut p = std::path::PathBuf::from(home);
+        let mut p = PathBuf::from(home);
         p.push(".cache");
         p
     } else {
-        std::path::PathBuf::from(".")
+        PathBuf::from(".")
     };
 
     path.push(DB_DIR_NAME); // "y4-clipboard"
 
     if !path.exists() {
-        let mut builder = fs::DirBuilder::new();
+        let mut builder = DirBuilder::new();
         builder.recursive(true).mode(0o700);
         let _ = builder.create(&path);
     }
     path
+}
+
+/// Resolve the path of the IPC control socket.
+///
+/// SECURITY FIX: the previous implementation always placed the socket at a
+/// predictable path directly under `/tmp` (`/tmp/y4-clipboard.<uid>.sock`).
+/// `/tmp` is world-writable; a predictable path in a world-writable
+/// directory is a classic local symlink/TOCTOU target — another local user
+/// can pre-place a symlink at that exact path before the daemon starts, and
+/// depending on kernel path-resolution semantics for `bind(2)`, the daemon
+/// could end up creating its socket file at an attacker-chosen location
+/// instead of `/tmp`.
+///
+/// `$XDG_RUNTIME_DIR` is a per-user, non-world-writable, mode-0700 directory
+/// by specification (already how Wayland's own compositor socket and most
+/// other user session daemons — systemd, PipeWire, PulseAudio — place their
+/// sockets), so preferring it removes this class of attack entirely. `/tmp`
+/// is retained only as a last-resort fallback for environments without a
+/// session manager (e.g. certain minimal containers).
+pub fn get_socket_path() -> PathBuf {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let mut path = PathBuf::from(runtime_dir);
+        path.push(DB_DIR_NAME);
+
+        if !path.exists() {
+            let mut builder = DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            let _ = builder.create(&path);
+        }
+
+        path.push(SOCKET_FILE_NAME);
+        return path;
+    }
+
+    // Fallback: still per-user (uid-suffixed) to avoid cross-user collisions.
+    PathBuf::from(format!("/tmp/{}.{}.sock", DB_DIR_NAME, unsafe { libc::getuid() }))
 }
 
 pub fn request_exit() {
