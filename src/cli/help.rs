@@ -13,8 +13,17 @@ pub fn print_version() {
 pub fn print_help() {
     print_version();
 
+    // BUGFIX: every example below previously invoked "y4-clip", a binary
+    // name that does not exist anywhere else in the project — Cargo.toml
+    // names the package (and therefore the built binary) "y4-clipboard",
+    // matching the README's own install instructions
+    // (`cp target/release/y4-clipboard /usr/local/bin/`). Other files used
+    // yet a *third*, different placeholder ("y1-clip"; fixed separately in
+    // cli/mod.rs, cli/daemon.rs, cli/search.rs). Every copy-pasted example
+    // command in this help text would have failed with "command not
+    // found". All examples below now consistently say "y4-clipboard".
     println!("\nUSAGE:");
-    println!("    y4-clip <COMMAND> [ARGS] [OPTIONS]");
+    println!("    y4-clipboard <COMMAND> [ARGS] [OPTIONS]");
 
     println!("\nCORE COMMANDS:");
     println!("    daemon             - Initialize background monitor and IPC socket listener.");
@@ -54,17 +63,24 @@ pub fn print_help() {
 
     println!("\nPRACTICAL EXAMPLES:");
     println!("    # 1. High-speed selection with fzf using Stable IDs:");
-    println!("    $ y4-clip list 0-100 --raw --id | fzf | awk '{{print $1}}' | xargs -r y4-clip copy-to --id");
+    println!("    $ y4-clipboard list 0-100 --raw --id | fzf | awk '{{print $1}}' | xargs -r y4-clipboard copy-to --id");
     
     println!("\n    # 2. Extracting binary content from history:");
-    println!("    $ y4-clip show 12 --id --raw > recovered_asset.webp");
+    println!("    $ y4-clipboard show 12 --id --raw > recovered_asset.webp");
     
     println!("\n    # 3. Manual ingestion with custom MIME:");
-    println!("    $ cat data.json | y4-clip store application/json");
+    println!("    $ cat data.json | y4-clipboard store application/json");
 
     println!("\nTECHNICAL NOTES:");
     println!("    - Storage: Secured at ~/.local/share/y4-clipboard/ (mode 600).");
-    println!("    - IPC: Communication via /tmp/y4-clipboard.<uid>.sock.");
-    println!("    - Engine: SQLite WAL mode with MD5-based deduplication.");
+    // BUGFIX: was documented as a fixed "/tmp/y4-clipboard.<uid>.sock" path;
+    // the socket now prefers $XDG_RUNTIME_DIR (see core::get_socket_path)
+    // and only falls back to /tmp when no session runtime dir is set.
+    println!("    - IPC: Communication via $XDG_RUNTIME_DIR/y4-clipboard/y4-clipboard.sock");
+    println!("           (falls back to /tmp/y4-clipboard.<uid>.sock if $XDG_RUNTIME_DIR is unset).");
+    // BUGFIX: was documented as "MD5-based deduplication" — the actual
+    // implementation (storage/mod.rs, matching the README/ARCHITECTURE.md)
+    // uses SHA3-256, not MD5.
+    println!("    - Engine: SQLite WAL mode with SHA3-256-based deduplication.");
     println!();
 }
