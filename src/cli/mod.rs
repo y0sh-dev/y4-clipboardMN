@@ -37,7 +37,9 @@ pub fn handle_command(args: &[String], mut db: ClipboardDb) {
     // 2. Prevent option-formatted strings from being interpreted as commands
     if utils::is_option(cmd) {
         eprintln!("{}invalid command format: '{}'", LOG_ERROR, cmd);
-        println!("usage: y1-clip <command> [options]");
+        // BUGFIX: was "y1-clip" — leftover placeholder name, inconsistent
+        // with the actual product name used everywhere else.
+        println!("usage: y4-clipboard <command> [options]");
         std::process::exit(1);
     }
 
@@ -64,7 +66,7 @@ pub fn handle_command(args: &[String], mut db: ClipboardDb) {
 
         _ => {
             eprintln!("{}unknown command: '{}'", LOG_ERROR, cmd);
-            println!("consult 'y1-clip help' for valid operations.");
+            println!("consult 'y4-clipboard help' for valid operations.");
             std::process::exit(1);
         }
     }
