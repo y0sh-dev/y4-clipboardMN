@@ -33,7 +33,26 @@ impl AlignedBuffer {
         Self { ptr, layout }
     }
 
-    pub fn as_mut_slice<'a>(&mut self) -> &'a mut [u8] {
+    /// SOUNDNESS BUGFIX: the previous signature was
+    /// `fn as_mut_slice<'a>(&mut self) -> &'a mut [u8]`. `'a` is an
+    /// unconstrained lifetime with no relationship to `&mut self`'s
+    /// lifetime — the compiler infers it independently at each call site
+    /// (commonly as `'static`), so the returned slice is *not* borrow-
+    /// checked against `self` at all. Callers are free to let the
+    /// `AlignedBuffer` drop (freeing the allocation via `dealloc` in `Drop`)
+    /// while still holding the slice, producing a dangling pointer and a
+    /// use-after-free that the borrow checker will not catch — precisely
+    /// the kind of bug that "compiles cleanly" while being unsound. The
+    /// current call site in `device.rs` happens to keep both alive in the
+    /// same scope, so it doesn't manifest today, but the API itself is a
+    /// live landmine for any future refactor (e.g. buffer pooling/reuse for
+    /// the planned Incremental BLOB I/O streaming path) that hands the
+    /// slice to a different scope.
+    ///
+    /// Removing the free lifetime parameter ties the returned slice's
+    /// lifetime to `&mut self` as normal Rust elision would, which is what
+    /// was clearly intended.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
     }
 }
