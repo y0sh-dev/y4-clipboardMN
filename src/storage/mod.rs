@@ -6,9 +6,43 @@
 use rusqlite::{params, Connection, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fs;
+use std::path::PathBuf;
 use std::os::unix::fs::PermissionsExt;
 use sha3::{Sha3_256, Digest}; 
 use crate::core::constants::*;
+
+/// A single metadata row, shared by `fetch_metadata` and `search_metadata` so
+/// callers (and future callers) don't have to keep re-deriving the same
+/// 5-tuple shape by hand.
+pub type MetaRow = (i64, i64, String, i64, Option<String>);
+
+/// Identifies where a record's binary payload currently lives.
+///
+/// STRUCTURAL PREP for the planned Incremental BLOB I/O and zero-copy egress
+/// (sendfile(2)/splice(2)) milestones: today, `get_content_by_id` always
+/// materializes the full payload into a `Vec<u8>` regardless of size or
+/// where it lives, which is exactly what those two milestones need to stop
+/// doing. Future streaming code should branch on `ContentLocation` instead
+/// of re-deriving "is it inline or cached on disk" logic itself:
+///   - `InlineBlob(rowid)`: open with `sqlite3_blob_open` against `rowid`
+///     for fixed-size incremental reads, instead of `SELECT content`.
+///   - `CacheFile(path)`: open the path directly and `sendfile(2)`/
+///     `splice(2)` it straight to the destination fd, without ever copying
+///     it through a userspace `Vec<u8>`.
+///
+/// NOT YET WIRED to any call site — no code branches on this today, hence
+/// `#[allow(dead_code)]` below. Deliberately left unimplemented rather than
+/// half-wired: actually consuming it means adding a real `sqlite3_blob_open`-
+/// based reader and a `sendfile(2)`/`splice(2)` egress path in
+/// `wayland/handlers/data_control/source.rs`, which is real new logic (not
+/// a refactor of existing, already-tested code) and was left out of this
+/// pass so it isn't shipped without being exercised. Remove the
+/// `#[allow(dead_code)]` once a caller exists.
+#[allow(dead_code)]
+pub enum ContentLocation {
+    InlineBlob(i64),
+    CacheFile(PathBuf),
+}
 
 pub struct ClipboardDb {
     conn: Connection,
@@ -62,8 +96,10 @@ impl ClipboardDb {
         Ok(Self { conn })
     }
 
-    /// Public wrapper for raw data insertion.
-    pub fn insert_raw(&mut self, mime: &str, data: &[u8]) -> Result<()> {
+    /// Public wrapper for raw data insertion. Returns the persistent row ID
+    /// of the record now representing this content (either newly inserted,
+    /// or the pre-existing record if this was a duplicate by hash).
+    pub fn insert_raw(&mut self, mime: &str, data: &[u8]) -> Result<i64, String> {
         let mut hasher = Sha3_256::new();
         hasher.update(data);
         let hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
@@ -71,9 +107,24 @@ impl ClipboardDb {
     }
 
     /// Optimized insertion utilizing a pre-computed hash and atomic transactions.
-    pub fn insert_with_hash(&mut self, mime: &str, data: &[u8], hash: &str) -> Result<()> {
-        if data.is_empty() { return Ok(()); }
-        if SENSITIVE_MIME_HINTS.iter().any(|&hint| mime.contains(hint)) { return Ok(()); }
+    ///
+    /// BUGFIX: previously returned `Result<()>`, forcing every caller that
+    /// needed the inserted row's ID (e.g. `store` syncing the new entry back
+    /// to the daemon) to run a *separate* `fetch_metadata(1)` query
+    /// afterwards and assume "the most-recently-timestamped row is the one I
+    /// just inserted". That assumption races against the daemon's own
+    /// worker thread, which can insert a newer clipboard entry in the
+    /// window between this call returning and that follow-up query running
+    /// — causing the wrong entry to be restored to the clipboard. Returning
+    /// the ID directly, computed inside the same transaction via
+    /// `last_insert_rowid()`, removes the race entirely.
+    ///
+    /// Skipped inserts (empty payload, sensitive MIME) return `Ok(-1)` as an
+    /// explicit "nothing to reference" sentinel — there is no record for a
+    /// caller to act on in that case.
+    pub fn insert_with_hash(&mut self, mime: &str, data: &[u8], hash: &str) -> Result<i64, String> {
+        if data.is_empty() { return Ok(-1); }
+        if SENSITIVE_MIME_HINTS.iter().any(|&hint| mime.contains(hint)) { return Ok(-1); }
 
         let is_image = mime.starts_with("image/") || mime.contains("gif");
         
@@ -85,16 +136,24 @@ impl ClipboardDb {
             }
         }
 
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-        let tx = self.conn.transaction()?;
+        // Was `.unwrap()`: a monotonic clock read before UNIX_EPOCH should
+        // never happen on a real system, but with `panic = "abort"` in the
+        // release profile, even that near-impossible case would abort the
+        // *entire* daemon process instead of degrading gracefully. `0`
+        // (UNIX_EPOCH) is a safe, inert fallback for a timestamp field used
+        // only for MRU ordering/display.
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
 
         let existing: Option<i64> = tx.query_row(
             "SELECT id FROM clipboard WHERE hash = ?1 LIMIT 1",
             params![hash], |row| row.get(0)
         ).ok();
 
-        if let Some(id) = existing {
-            tx.execute("UPDATE clipboard SET timestamp = ?1 WHERE id = ?2", params![ts, id])?;
+        let real_id = if let Some(id) = existing {
+            tx.execute("UPDATE clipboard SET timestamp = ?1 WHERE id = ?2", params![ts, id])
+                .map_err(|e| e.to_string())?;
+            id
         } else {
             let preview = if mime.contains("text") || mime.contains("uri-list") {
                 let s = String::from_utf8_lossy(data);
@@ -106,23 +165,26 @@ impl ClipboardDb {
             tx.execute(
                 "INSERT INTO clipboard (timestamp, mime, size, preview, content, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![ts, mime, data.len() as i64, preview, db_content, hash],
-            )?;
-        }
+            ).map_err(|e| e.to_string())?;
+
+            tx.last_insert_rowid()
+        };
 
         let expired_hashes: Vec<String> = {
             let mut stmt = tx.prepare(
                 "SELECT hash FROM clipboard WHERE id NOT IN (SELECT id FROM clipboard ORDER BY timestamp DESC LIMIT ?1)"
-            )?;
-            let rows = stmt.query_map(params![MAX_HISTORY as i64], |row| row.get::<_, String>(0))?;
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(params![MAX_HISTORY as i64], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         };
 
         tx.execute(
             "DELETE FROM clipboard WHERE id NOT IN (SELECT id FROM clipboard ORDER BY timestamp DESC LIMIT ?1)",
             params![MAX_HISTORY as i64]
-        )?;
+        ).map_err(|e| e.to_string())?;
 
-        tx.commit()?;
+        tx.commit().map_err(|e| e.to_string())?;
 
         for h in expired_hashes {
             let mut cache_path = crate::core::get_cache_dir();
@@ -130,16 +192,33 @@ impl ClipboardDb {
             let _ = fs::remove_file(cache_path);
         }
 
-        Ok(())
+        Ok(real_id)
     }
 
     /// Search metadata with protection against full BLOB scans.
     /// Optimized to only scan content when mime is text-based and preview is insufficient.
-    pub fn search_metadata(&self, query: &str, limit: usize) -> Vec<(i64, i64, String, i64, Option<String>)> {
+    ///
+    /// BUGFIX: previously returned rows in isolation, and `cli/search.rs`
+    /// assigned each hit a LOCAL index via `.enumerate()` over just the
+    /// search results. That index space does *not* match the absolute
+    /// history index `list`/`copy-to`/`delete`/`show` use (which is the
+    /// position within the *full* MRU history). Running `search foo` and
+    /// then feeding one of its displayed indices into `copy-to <n>` (without
+    /// `--id`) could therefore restore a completely different entry than
+    /// the one shown.
+    ///
+    /// Fixed by computing each row's absolute MRU index (`ROW_NUMBER() OVER
+    /// (ORDER BY timestamp DESC) - 1`, matching exactly how `list.rs`
+    /// derives it) over the *whole* table before filtering, so a search
+    /// result's displayed index is always consistent with `list`'s.
+    pub fn search_metadata(&self, query: &str, limit: usize) -> Vec<(usize, MetaRow)> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, timestamp, mime, size, preview FROM clipboard 
-             WHERE (mime LIKE '%text%' OR mime LIKE '%UTF8%') 
-             AND (preview LIKE ?1 OR (preview IS NULL AND CAST(content AS TEXT) LIKE ?1))
+            "SELECT abs_idx, id, timestamp, mime, size, preview FROM (
+                SELECT id, timestamp, mime, size, preview, content,
+                       ROW_NUMBER() OVER (ORDER BY timestamp DESC) - 1 AS abs_idx
+                FROM clipboard
+             ) WHERE (mime LIKE '%text%' OR mime LIKE '%UTF8%')
+               AND (preview LIKE ?1 OR (preview IS NULL AND CAST(content AS TEXT) LIKE ?1))
              ORDER BY timestamp DESC LIMIT ?2"
         ) {
             Ok(s) => s,
@@ -147,20 +226,36 @@ impl ClipboardDb {
         };
 
         let query_param = format!("%{}%", query);
-        let rows = stmt.query_map(params![query_param, limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-        }).unwrap();
+        let rows = match stmt.query_map(params![query_param, limit as i64], |row| {
+            let abs_idx: i64 = row.get(0)?;
+            Ok((abs_idx as usize, (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
 
         rows.filter_map(|r| r.ok()).collect()
     }
 
-    pub fn fetch_metadata(&self, limit: usize) -> Vec<(i64, i64, String, i64, Option<String>)> {
-        let mut stmt = self.conn.prepare(
+    pub fn fetch_metadata(&self, limit: usize) -> Vec<MetaRow> {
+        // Was `.unwrap()` in two places here: a transient `prepare`/
+        // `query_map` failure (e.g. a locked or momentarily-busy database)
+        // would previously abort the whole process under `panic = "abort"`.
+        // `fetch_metadata` is read-only display data — degrading to an
+        // empty result on failure is always safe and keeps the caller (and,
+        // for future callers, the daemon) alive.
+        let mut stmt = match self.conn.prepare(
             "SELECT id, timestamp, mime, size, preview FROM clipboard ORDER BY timestamp DESC LIMIT ?1"
-        ).unwrap();
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![limit as i64], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-        }).unwrap();
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
         rows.filter_map(|r| r.ok()).collect()
     }
 
@@ -181,6 +276,27 @@ impl ClipboardDb {
         }
     }
 
+    /// See `ContentLocation` docs: a non-materializing counterpart to
+    /// `get_content_by_id`, intended for the future streaming/zero-copy
+    /// egress path. Not yet consumed anywhere — this is the interface seam,
+    /// not the streaming implementation itself.
+    #[allow(dead_code)]
+    pub fn locate_content(&self, id: i64) -> Option<ContentLocation> {
+        let (has_content, hash): (bool, String) = self.conn.query_row(
+            "SELECT content IS NOT NULL, hash FROM clipboard WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?))
+        ).ok()?;
+
+        if has_content {
+            Some(ContentLocation::InlineBlob(id))
+        } else {
+            let mut cache_path = crate::core::get_cache_dir();
+            cache_path.push(format!("{}.cache", hash));
+            Some(ContentLocation::CacheFile(cache_path))
+        }
+    }
+
     pub fn get_latest_data(&self) -> Option<Vec<u8>> {
         // Reuse get_content_by_id logic for consistency
         let id: i64 = self.conn.query_row(
@@ -192,7 +308,7 @@ impl ClipboardDb {
 
     /// Update record timestamp. Standardized to &mut self for state consistency.
     pub fn update_timestamp(&mut self, id: i64) -> Result<()> {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
         self.conn.execute("UPDATE clipboard SET timestamp = ?1 WHERE id = ?2", params![ts, id])?;
         Ok(())
     }
