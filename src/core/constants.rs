@@ -16,6 +16,12 @@ pub const IPC_DELIMITER:   u8 = b'\n';
 
 pub const RECONNECT_DELAY_MS: u64 = 500;
 
+// Filename of the IPC control socket. Resolution of the *directory* it lives
+// in (XDG_RUNTIME_DIR preferred, /tmp as a last-resort fallback) is handled
+// by `crate::core::get_socket_path()`, since that decision depends on
+// runtime environment, not just a fixed string.
+pub const SOCKET_FILE_NAME: &str = "y4-clipboard.sock";
+
 // --- Security & Privacy Configuration ---
 // Clipboard security: MIME types to exclude from persistent storage
 pub const SENSITIVE_MIME_HINTS: &[&str] = &[
@@ -71,7 +77,13 @@ pub const LOG_INFO:  &str = "info: ";
 pub const LOG_ERROR: &str = "error: ";
 
 pub const MSG_DAEMON_START: &str = "starting y4-clipboard daemon...";
+// Emitted once the daemon has actually bound the Wayland data-control
+// manager + seat and entered its serving loop. Distinct from
+// MSG_DAEMON_START so a startup *failure* (bad socket bind, no compositor,
+// missing protocol) is never misreported as "daemon started".
+pub const MSG_DAEMON_READY: &str = "daemon operational; listening for clipboard and IPC events.";
 pub const MSG_DAEMON_STOP:  &str = "daemon process terminated.";
+pub const MSG_DAEMON_START_FAILED: &str = "daemon failed to start (see error above).";
 pub const MSG_WAYLAND_CONN_FAIL: &str = "failed to connect to wayland compositor. is DISPLAY/WAYLAND_DISPLAY set?";
 
 pub fn log_save(mime: &str, size: usize) -> String {
@@ -88,12 +100,4 @@ pub fn log_seat_detected(name: &str, caps: &str) -> String {
 
 pub fn log_protocol_bound(interface: &str) -> String {
     format!("{}bound to wayland interface: {}", LOG_INFO, interface)
-}
-
-/// Path to the Unix Domain Socket for Inter-Process Communication.
-pub const SOCKET_PATH: &str = "/tmp/y4-clipboard.sock";
-
-/// Returns the user-specific socket path to prevent multi-user conflicts.
-pub fn get_socket_path() -> String {
-    format!("{}.{}.sock", SOCKET_PATH, unsafe { libc::getuid() })
 }
