@@ -42,30 +42,42 @@ pub fn run(args: &[String], db: &mut ClipboardDb) {
         return;
     }
 
-    // Execute atomic persistence with internal deduplication
+    // Execute atomic persistence with internal deduplication.
+    //
+    // BUGFIX: previously `insert_raw` returned `Result<()>`, so the ID of
+    // the record to sync back to the daemon was obtained via a *separate*
+    // `db.fetch_metadata(1)` call afterwards, assuming "the newest
+    // timestamp is the one I just wrote". That's racy against the daemon's
+    // own worker thread inserting a fresh clipboard entry in the gap
+    // between the two calls, which could make `store` restore the wrong
+    // item to the system clipboard. `insert_raw` now returns the ID
+    // directly (computed inside the same transaction), so there is no gap.
     match db.insert_raw(mime, &buffer) {
-        Ok(_) => {
+        Ok(real_id) if real_id >= 0 => {
             if ctx.verbose {
                 println!("{}", log_save(mime, buffer.len()));
             }
 
-            // Obtain the record identifier for the entry just processed
-            let meta = db.fetch_metadata(1);
-            if let Some(&(real_id, _, _, _, _)) = meta.first() {
-                
-                // IPC: Notify the running daemon to synchronize this new ID
-                use std::os::unix::net::UnixStream;
-                if let Ok(mut stream) = UnixStream::connect(crate::core::get_socket_path()) {
-                    let mut payload = vec![IPC_CMD_RESTORE];
-                    payload.extend_from_slice(real_id.to_string().as_bytes());
-                    payload.push(IPC_DELIMITER);
-                    let _ = stream.write_all(&payload);
-                    let _ = stream.flush();
-                }
+            // IPC: Notify the running daemon to synchronize this new ID
+            use std::os::unix::net::UnixStream;
+            if let Ok(mut stream) = UnixStream::connect(crate::core::get_socket_path()) {
+                let mut payload = vec![IPC_CMD_RESTORE];
+                payload.extend_from_slice(real_id.to_string().as_bytes());
+                payload.push(IPC_DELIMITER);
+                let _ = stream.write_all(&payload);
+                let _ = stream.flush();
+            }
 
-                if ctx.verbose {
-                    println!("{}system clipboard synchronized.", LOG_INFO);
-                }
+            if ctx.verbose {
+                println!("{}system clipboard synchronized.", LOG_INFO);
+            }
+        }
+        Ok(_) => {
+            // Sentinel -1: insert_raw deliberately skipped storage (e.g. a
+            // sensitive MIME hint). Nothing was persisted, so there is
+            // nothing to synchronize back to the daemon.
+            if ctx.verbose {
+                println!("{}payload skipped by storage policy; not synchronized.", LOG_INFO);
             }
         }
         Err(e) => {
