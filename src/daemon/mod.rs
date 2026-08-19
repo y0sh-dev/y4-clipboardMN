@@ -3,9 +3,9 @@
 
 // src/daemon/mod.rs
 
-use crate::storage::ClipboardDb;
+use crate::storage::{ClipboardDb, ContentLocation};
 use crate::wayland;
-use crate::wayland::state::{WaylandState, ClipboardJob};
+use crate::wayland::state::{WaylandState, ClipboardJob, SourceMetadata, SourcePayload};
 use crate::core::constants::*;
 use crate::core::SocketGuard;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -174,23 +174,44 @@ fn bind_data_device(
 }
 
 /// Serve a historical record with narrow lock scope and broad MIME compatibility.
+///
+/// Kernel-level egress: uses `locate_content` instead of always
+/// materializing the payload into memory. Large binaries (images) living in
+/// the on-disk cache are handed to the data source as a `SourcePayload::File`,
+/// so `wayland/handlers/data_control/source.rs` can transfer them straight
+/// from disk to the requesting client's pipe via `sendfile(2)` — this
+/// process's heap never holds the full payload at all. Small/inline entries
+/// (text) still go through the existing `get_content_by_id` (`Vec<u8>`) path,
+/// since by construction (see `insert_with_hash`) they're never the
+/// large-payload case this exists for.
 fn handle_restore_request(state: &mut WaylandState, qh: &wayland_client::QueueHandle<WaylandState>, real_id: i64, conn: &wayland_client::Connection) {
-    let db_payload = {
+    let resolved = {
         if let Some(ref db_mutex) = state.db {
             if let Ok(db) = db_mutex.lock() {
-                db.get_content_by_id(real_id)
+                db.locate_content(real_id)
             } else { None }
         } else { None }
     };
 
-    if let Some((mime, val)) = db_payload
+    if let Some((mime, location)) = resolved
         && let Some(ref manager) = state.manager {
         state.provider_locks += 1;
 
-        let meta = crate::wayland::state::SourceMetadata {
-            mime: mime.clone(),
-            data: val,
+        let payload = match location {
+            ContentLocation::InlineBlob(id) => {
+                let data = {
+                    if let Some(ref db_mutex) = state.db {
+                        if let Ok(db) = db_mutex.lock() {
+                            db.get_content_by_id(id).map(|(_, d)| d)
+                        } else { None }
+                    } else { None }
+                }.unwrap_or_default();
+                SourcePayload::Owned(data)
+            }
+            ContentLocation::CacheFile(path) => SourcePayload::File(path),
         };
+
+        let meta = SourceMetadata { mime: mime.clone(), payload };
 
         let source = manager.create_data_source(qh, meta);
         
