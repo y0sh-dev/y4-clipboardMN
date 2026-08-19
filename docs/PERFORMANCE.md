@@ -109,7 +109,29 @@ We continue to push the boundaries of what is possible for a Wayland clipboard m
 - [x] **Proactive Resource Reclamation**: RSS management via `malloc_trim`.
 
 ### [ ] The Next Frontier (Planned)
-- [ ] **Incremental BLOB I/O**: Direct pipe-to-disk streaming via `sqlite3_blob_open` to fix memory usage at 64KB regardless of file size.
-- [ ] **Kernel-level Egress**: Implementing `sendfile(2)` or `splice(2)` for `copy-to` operations to bypass user-space memory entirely.
-- [ ] **SIMD-accelerated Fingerprinting**: Explicit use of SHA-NI or AVX-512 instructions to further reduce CPU cycles during hashing.
+- [x] **Kernel-level Egress**: `sendfile(2)` for `copy-to` operations on cache-backed
+  (image) entries, bypassing user-space memory entirely for both the read and the
+  now-eliminated duplicate `.clone()` that previously happened on every send.
+  Implemented in `wayland/handlers/data_control/source.rs`; see
+  `storage::ContentLocation` / `ClipboardDb::locate_content` for how a record is
+  routed to this path vs. the existing in-memory path.
+- [ ] ~~**Incremental BLOB I/O**~~ — reviewed, not pursued. The stated goal (fix
+  memory usage at 64KB regardless of file size) is already met for the case that
+  matters: large binaries never go through the SQLite BLOB column at all — the
+  Hybrid Storage Engine (§4) already routes them to the on-disk cache, which is
+  exactly what Kernel-level Egress above now reads from directly. `sqlite3_blob_open`
+  incremental I/O would only affect small inline (text) rows, and additionally
+  conflicts with the current unknown-length pipe-streaming ingestion model: `zeroblob`
+  requires the final size up front, which would mean buffering to learn the size
+  before writing the blob — reintroducing the double-read this architecture exists
+  to avoid.
+- [ ] ~~**SIMD-accelerated Fingerprinting**~~ — reviewed, not pursued. SHA-NI is an
+  Intel extension for SHA-1/SHA-256; it does not apply to SHA3 (Keccak) at all, which
+  is what this project hashes with. An AVX-512 Keccak path exists in principle but
+  isn't available in the Rust crates this project depends on, and would require
+  unsafe hand-written intrinsics or a algorithm change (breaking existing hashes/
+  cache filenames) to obtain. Software SHA3-256 already hashes a 70MB payload in
+  the tens-of-milliseconds range — below what's perceptible for a one-shot clipboard
+  event — so the cost doesn't clear the bar for this project's actual workload.
+
 
