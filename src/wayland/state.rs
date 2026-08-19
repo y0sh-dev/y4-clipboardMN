@@ -10,15 +10,34 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_manager_v1::ExtDataControlManagerV1,
     ext_data_control_source_v1::ExtDataControlSourceV1,
 };
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
 pub struct OfferData {
     pub mimes: Arc<Mutex<Vec<String>>>,
 }
 
+/// Where a `SourceMetadata`'s bytes actually live.
+///
+/// Added for kernel-level egress (PERFORMANCE.md "Next Frontier"): before
+/// this, `SourceMetadata` always held a fully-materialized `Vec<u8>`, even
+/// for large cached binaries (images) -- meaning a `copy-to` of a 70MB image
+/// read the whole file into memory in `get_content_by_id`, then the old
+/// `source.rs` Send handler unconditionally `.clone()`d it again before
+/// writing it out. `File` lets the Send handler skip both copies entirely
+/// and hand the destination pipe straight to `sendfile(2)`.
+pub enum SourcePayload {
+    /// Small/inline payload (text, or anything the DB stored directly in
+    /// its BLOB column) held in memory, same as before.
+    Owned(Vec<u8>),
+    /// Large binary payload living in the on-disk cache. The Send handler
+    /// opens this path itself and transfers it kernel-side.
+    File(PathBuf),
+}
+
 pub struct SourceMetadata {
     pub mime: String,
-    pub data: Vec<u8>,
+    pub payload: SourcePayload,
 }
 
 pub struct ClipboardJob {
