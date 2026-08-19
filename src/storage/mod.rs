@@ -30,15 +30,15 @@ pub type MetaRow = (i64, i64, String, i64, Option<String>);
 ///     `splice(2)` it straight to the destination fd, without ever copying
 ///     it through a userspace `Vec<u8>`.
 ///
-/// NOT YET WIRED to any call site — no code branches on this today, hence
-/// `#[allow(dead_code)]` below. Deliberately left unimplemented rather than
-/// half-wired: actually consuming it means adding a real `sqlite3_blob_open`-
-/// based reader and a `sendfile(2)`/`splice(2)` egress path in
-/// `wayland/handlers/data_control/source.rs`, which is real new logic (not
-/// a refactor of existing, already-tested code) and was left out of this
-/// pass so it isn't shipped without being exercised. Remove the
-/// `#[allow(dead_code)]` once a caller exists.
-#[allow(dead_code)]
+/// WIRED IN: `daemon::handle_restore_request` uses `locate_content` to pick
+/// between the two, and `wayland::handlers::data_control::source` sends a
+/// `CacheFile` payload via `sendfile(2)` — see that module for the actual
+/// zero-copy transfer. `InlineBlob` still goes through the pre-existing
+/// `get_content_by_id` (`Vec<u8>`) path rather than `sqlite3_blob_open`
+/// incremental reads: inline rows are, by construction (see
+/// `insert_with_hash`), never the large-binary case this exists for, so
+/// that half of the original plan was intentionally not pursued — see
+/// PERFORMANCE.md for the cost/benefit writeup.
 pub enum ContentLocation {
     InlineBlob(i64),
     CacheFile(PathBuf),
@@ -277,23 +277,24 @@ impl ClipboardDb {
     }
 
     /// See `ContentLocation` docs: a non-materializing counterpart to
-    /// `get_content_by_id`, intended for the future streaming/zero-copy
-    /// egress path. Not yet consumed anywhere — this is the interface seam,
-    /// not the streaming implementation itself.
-    #[allow(dead_code)]
-    pub fn locate_content(&self, id: i64) -> Option<ContentLocation> {
-        let (has_content, hash): (bool, String) = self.conn.query_row(
-            "SELECT content IS NOT NULL, hash FROM clipboard WHERE id = ?1",
+    /// `get_content_by_id`. Used by the kernel-level egress path
+    /// (`daemon::handle_restore_request` / `wayland::handlers::data_control::source`)
+    /// to decide whether a `copy-to` can be served via `sendfile(2)`
+    /// directly from the cache file, or must go through the existing
+    /// in-memory path (small/inline payloads).
+    pub fn locate_content(&self, id: i64) -> Option<(String, ContentLocation)> {
+        let (mime, has_content, hash): (String, bool, String) = self.conn.query_row(
+            "SELECT mime, content IS NOT NULL, hash FROM clipboard WHERE id = ?1",
             params![id],
-            |row| Ok((row.get(0)?, row.get(1)?))
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         ).ok()?;
 
         if has_content {
-            Some(ContentLocation::InlineBlob(id))
+            Some((mime, ContentLocation::InlineBlob(id)))
         } else {
             let mut cache_path = crate::core::get_cache_dir();
             cache_path.push(format!("{}.cache", hash));
-            Some(ContentLocation::CacheFile(cache_path))
+            Some((mime, ContentLocation::CacheFile(cache_path)))
         }
     }
 
