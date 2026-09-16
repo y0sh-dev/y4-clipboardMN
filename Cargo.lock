@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "y4p"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "ctrlc",
  "libc",
