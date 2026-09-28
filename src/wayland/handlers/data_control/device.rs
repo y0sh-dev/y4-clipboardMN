@@ -119,9 +119,6 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
 /// Factored out of the Selection handler so it can be called from the
 /// dedicated per-selection thread the handler spawns.
 fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>, config: &Config) {
-    let source_app = crate::wayland::active_app::detect_active_app();
-    if config.is_app_ignored(source_app.as_deref()) { return; }
-
     let mut payload = Vec::with_capacity(1048576);
     let mut reader = read_file.take(268435456);
 
@@ -144,32 +141,20 @@ fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: b
         if payload.is_empty() { return; }
     } else if let Some(m) = crate::core::utils::detect_image_mime(&payload) {
         final_mime = m.to_string();
-        // A compositor transfer can be cut short the same way a curl
-        // download can — repair before this payload's hash is ever computed.
-        payload = crate::core::utils::sanitize_image_payload(payload, &final_mime);
     } else if crate::core::utils::is_html_mime(&final_mime) && config.should_downgrade_html() {
         // Strip HTML tags when no plain-text alternative was offered alongside markup.
         payload = crate::core::utils::strip_html_tags(&payload);
         if payload.is_empty() { return; }
         final_mime = DEFAULT_MIME.to_string();
-        if !config.should_bypass_sanitize(source_app.as_deref()) {
-            payload = crate::core::utils::sanitize_text_payload(&payload);
-            if payload.is_empty() { return; }
-        }
-    } else if crate::core::utils::is_text_mime(&final_mime)
-        && !config.should_bypass_sanitize(source_app.as_deref())
-    {
-        payload = crate::core::utils::sanitize_text_payload(&payload);
-        if payload.is_empty() { return; }
     }
 
-    // SHA3-256 fingerprint of the final normalised/sanitised payload actually being persisted.
+    // SHA3-256 fingerprint of the final normalised payload actually being persisted.
     let mut hasher = Sha3_256::new();
     hasher.update(&payload);
     let hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
     // Send the completed payload and its SHA3 fingerprint to the persistent worker.
-    let _ = job_tx.send(ClipboardJob { mime: final_mime, data: payload, hash, source_app });
+    let _ = job_tx.send(ClipboardJob { mime: final_mime, data: payload, hash });
 
     // SAFETY: `malloc_trim(0)` only requests the allocator release free
     // pages back to the OS; it doesn't touch any live allocation this

@@ -16,15 +16,6 @@
 # Default: 100
 max_history = 100
 
-[sanitize]
-# URL Tracking Sanitisation.
-# Automatically strips marketing, click-tracking, and analytics parameters
-# (e.g., utm_*, fbclid, gclid, mc_eid) from URLs found in plain text offers.
-# Platform-specific media parameters (such as YouTube 't' timestamp) are preserved.
-# Balanced parentheses in URLs (e.g. Wikipedia links) are protected.
-# Default: true
-strip_tracking = true
-
 [mime]
 # Drop Rich Text Format (text/rtf, application/rtf) offers at ingress when
 # a corresponding plain text offer is already present, preventing bloat.
@@ -35,16 +26,3 @@ drop_rtf = true
 # did not provide a text/plain offer, stripping markup tags cleanly.
 # Default: true
 downgrade_html = true
-
-[app]
-# Application exclusion list.
-# Offers originating from active windows matching these App IDs (Wayland app_id
-# or XWayland window class retrieved via compositor IPC) are rejected at ingress.
-# Default: []
-ignore = []
-
-# Sanitisation bypass list.
-# Windows matching these App IDs bypass URL parameter sanitisation, ensuring
-# query strings remain untouched (e.g. for API consoles or debugging tools).
-# Default: []
-bypass_sanitize = []

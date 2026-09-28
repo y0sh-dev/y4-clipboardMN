@@ -43,9 +43,6 @@ pub struct ClipboardJob {
     pub mime: String,
     pub data: Vec<u8>,
     pub hash: String,
-    // Advisory focused window App ID at ingestion time.
-    // Kept in memory only; never persisted to storage.
-    pub source_app: Option<String>,
 }
 
 pub struct WaylandState {

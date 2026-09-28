@@ -26,17 +26,6 @@ impl Default for GeneralConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SanitizeConfig {
-    pub strip_tracking: bool,
-}
-
-impl Default for SanitizeConfig {
-    fn default() -> Self {
-        Self { strip_tracking: true }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct MimeConfig {
     pub drop_rtf: bool,
     pub downgrade_html: bool,
@@ -49,17 +38,9 @@ impl Default for MimeConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct AppConfig {
-    pub ignore: Vec<String>,
-    pub bypass_sanitize: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Config {
     pub general: GeneralConfig,
-    pub sanitize: SanitizeConfig,
     pub mime: MimeConfig,
-    pub app: AppConfig,
 }
 
 impl Config {
@@ -126,20 +107,6 @@ impl Config {
         config
     }
 
-    /// Case-insensitive check of `app_id` against `[app] ignore`. `None`
-    /// (App ID undetectable — see `wayland::active_app`) never matches.
-    pub fn is_app_ignored(&self, app_id: Option<&str>) -> bool {
-        list_contains_ignore_case(&self.app.ignore, app_id)
-    }
-
-    /// True when this clipboard event's URL tracking-parameter sanitisation
-    /// should be skipped: either sanitisation is globally disabled
-    /// (`[sanitize] strip_tracking = false`), or the source app is
-    /// specifically listed in `[app] bypass_sanitize`.
-    pub fn should_bypass_sanitize(&self, app_id: Option<&str>) -> bool {
-        !self.sanitize.strip_tracking || list_contains_ignore_case(&self.app.bypass_sanitize, app_id)
-    }
-
     pub fn should_drop_rtf(&self) -> bool {
         self.mime.drop_rtf
     }
@@ -184,33 +151,6 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Splits a bracketed, comma-separated list of quoted strings (a single- or
-/// already-folded multi-line array's full text, brackets included) into its
-/// elements. An unquoted or otherwise malformed element — including the
-/// empty segment a trailing comma produces — is silently dropped rather
-/// than treated as an error.
-fn parse_string_array(text: &str) -> Vec<String> {
-    let trimmed = text.trim();
-    let Some(start) = trimmed.find('[') else { return Vec::new(); };
-    let Some(end) = trimmed.rfind(']') else { return Vec::new(); };
-    if start >= end { return Vec::new(); }
-    let inner = &trimmed[start + 1..end];
-    inner
-        .split(',')
-        .filter_map(|raw| {
-            let t = raw.trim();
-            if t.is_empty() { return None; }
-            if (t.starts_with('"') && t.ends_with('"') && t.len() >= 2)
-                || (t.starts_with('\'') && t.ends_with('\'') && t.len() >= 2)
-            {
-                Some(t[1..t.len() - 1].to_string())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn parse_bool(value: &str) -> Option<bool> {
     match value {
         "true" => Some(true),
@@ -234,24 +174,14 @@ fn apply_kv(config: &mut Config, section: &str, key: &str, value: &str) {
         ("general", "max_history") => {
             if let Some(n) = parse_usize(value) { config.general.max_history = n; }
         }
-        ("sanitize", "strip_tracking") => {
-            if let Some(b) = parse_bool(value) { config.sanitize.strip_tracking = b; }
-        }
         ("mime", "drop_rtf") => {
             if let Some(b) = parse_bool(value) { config.mime.drop_rtf = b; }
         }
         ("mime", "downgrade_html") => {
             if let Some(b) = parse_bool(value) { config.mime.downgrade_html = b; }
         }
-        ("app", "ignore") => { config.app.ignore = parse_string_array(value); }
-        ("app", "bypass_sanitize") => { config.app.bypass_sanitize = parse_string_array(value); }
         _ => {}
     }
-}
-
-fn list_contains_ignore_case(list: &[String], app_id: Option<&str>) -> bool {
-    let Some(app_id) = app_id else { return false; };
-    list.iter().any(|entry| entry.eq_ignore_ascii_case(app_id))
 }
 
 #[cfg(test)]
@@ -285,11 +215,8 @@ mod tests {
     fn default_matches_the_agreed_balanced_defaults() {
         let config = Config::default();
         assert_eq!(config.general.max_history, DEFAULT_MAX_HISTORY);
-        assert!(config.sanitize.strip_tracking);
         assert!(config.mime.drop_rtf);
         assert!(config.mime.downgrade_html);
-        assert!(config.app.ignore.is_empty());
-        assert!(config.app.bypass_sanitize.is_empty());
     }
 
     // --- Config::parse: the full agreed schema ---
@@ -300,44 +227,20 @@ mod tests {
             [general]
             max_history = 1000
 
-            [sanitize]
-            strip_tracking = true
-
             [mime]
             drop_rtf = true
             downgrade_html = true
-
-            [app]
-            ignore = [
-                "org.keepassxc.KeePassXC",
-                "Bitwarden",
-                "1Password",
-            ]
-            bypass_sanitize = [
-                "firefox",
-            ]
         "#;
 
         let config = Config::parse(toml);
         assert_eq!(config.general.max_history, 1000);
-        assert!(config.sanitize.strip_tracking);
         assert!(config.mime.drop_rtf);
         assert!(config.mime.downgrade_html);
-        assert_eq!(config.app.ignore, vec!["org.keepassxc.KeePassXC", "Bitwarden", "1Password"]);
-        assert_eq!(config.app.bypass_sanitize, vec!["firefox"]);
     }
 
     #[test]
     fn parse_empty_content_yields_defaults() {
         assert_eq!(Config::parse(""), Config::default());
-    }
-
-    #[test]
-    fn parse_single_line_array() {
-        let toml = r#"[app]
-ignore = ["a", "b", "c"]"#;
-        let config = Config::parse(toml);
-        assert_eq!(config.app.ignore, vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -348,9 +251,9 @@ ignore = ["a", "b", "c"]"#;
 
     #[test]
     fn parse_hash_inside_quoted_string_is_preserved() {
-        let toml = r#"[app]
-ignore = ["weird#app-id"]"#;
-        assert_eq!(Config::parse(toml).app.ignore, vec!["weird#app-id"]);
+        // The comment-stripping scanner itself is exercised directly here,
+        // since no remaining schema key holds a quoted string value.
+        assert_eq!(strip_comment(r#"foo = "weird#value" # trailing"#), r#"foo = "weird#value" "#);
     }
 
     #[test]
@@ -398,60 +301,7 @@ ignore = ["weird#app-id"]"#;
         assert_eq!(Config::parse(toml).general.max_history, 77);
     }
 
-    #[test]
-    fn parse_empty_array_yields_empty_vec() {
-        let toml = "[app]\nignore = []";
-        assert!(Config::parse(toml).app.ignore.is_empty());
-    }
-
-    // --- is_app_ignored ---
-
-    #[test]
-    fn is_app_ignored_matches_case_insensitively() {
-        let config = Config { app: AppConfig { ignore: vec!["Bitwarden".to_string()], ..Default::default() }, ..Default::default() };
-        assert!(config.is_app_ignored(Some("bitwarden")));
-        assert!(config.is_app_ignored(Some("BITWARDEN")));
-        assert!(!config.is_app_ignored(Some("firefox")));
-    }
-
-    #[test]
-    fn is_app_ignored_none_app_id_never_matches() {
-        let config = Config { app: AppConfig { ignore: vec!["Bitwarden".to_string()], ..Default::default() }, ..Default::default() };
-        assert!(!config.is_app_ignored(None));
-    }
-
-    #[test]
-    fn is_app_ignored_empty_list_never_matches() {
-        assert!(!Config::default().is_app_ignored(Some("anything")));
-    }
-
-    // --- should_bypass_sanitize ---
-
-    #[test]
-    fn should_bypass_sanitize_true_when_tracking_disabled_globally() {
-        let config = Config { sanitize: SanitizeConfig { strip_tracking: false }, ..Default::default() };
-        assert!(config.should_bypass_sanitize(Some("anything")));
-        assert!(config.should_bypass_sanitize(None));
-    }
-
-    #[test]
-    fn should_bypass_sanitize_true_for_a_listed_app_even_with_tracking_enabled() {
-        let config = Config {
-            sanitize: SanitizeConfig { strip_tracking: true },
-            app: AppConfig { bypass_sanitize: vec!["firefox".to_string()], ..Default::default() },
-            ..Default::default()
-        };
-        assert!(config.should_bypass_sanitize(Some("Firefox")));
-    }
-
-    #[test]
-    fn should_bypass_sanitize_false_by_default() {
-        let config = Config::default();
-        assert!(!config.should_bypass_sanitize(Some("firefox")));
-        assert!(!config.should_bypass_sanitize(None));
-    }
-
-    // --- the remaining should_* accessors ---
+    // --- the should_* accessors ---
 
     #[test]
     fn should_drop_rtf_mirrors_the_mime_config_field() {
@@ -477,15 +327,5 @@ ignore = ["weird#app-id"]"#;
         let content = std::fs::read_to_string("/nonexistent/y4p-config-test-path/y4p.toml");
         assert!(content.is_err());
         assert_eq!(Config::default(), Config::parse(""));
-    }
-
-    #[test]
-    fn parse_string_array_handles_single_quotes_and_brackets_in_string() {
-        let toml = r#"
-[app]
-ignore = ['single_quoted_app', "bracketed_]app"]
-"#;
-        let config = Config::parse(toml);
-        assert_eq!(config.app.ignore, vec!["single_quoted_app", "bracketed_]app"]);
     }
 }
