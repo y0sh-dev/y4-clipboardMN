@@ -99,50 +99,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Extracts the first `<img ... src="...">` (or `src='...'`) URL from a
-/// raw `text/html` clipboard payload.
-///
-/// Byte-slice scanning only — no HTML parser or regex crate, per the
-/// project's no-extra-dependency policy for this feature. `<img` and `src=`
-/// are matched case-insensitively via a lowercased copy; the returned URL is
-/// sliced from the *original* bytes so its casing is preserved. The search
-/// for `src=` is bounded to the first `<img...>` tag's own closing `>`, so a
-/// later, unrelated `src=` elsewhere in the document is never mistaken for
-/// this tag's attribute.
-pub fn extract_image_url_from_html(html: &[u8]) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
-    let img_pos = find_subslice(&lower, b"<img")?;
-    let tag_end = find_subslice(&lower[img_pos..], b">")
-        .map(|rel| img_pos + rel)
-        .unwrap_or(lower.len());
-
-    let src_rel = find_subslice(&lower[img_pos..tag_end], b"src=")?;
-    let mut i = img_pos + src_rel + 4; // past "src="
-    while lower.get(i).is_some_and(u8::is_ascii_whitespace) { i += 1; }
-
-    let quote = *html.get(i)?;
-    if quote != b'"' && quote != b'\'' { return None; }
-    i += 1;
-    let start = i;
-    while html.get(i).is_some_and(|&b| b != quote) { i += 1; }
-
-    (i < html.len()).then(|| String::from_utf8_lossy(&html[start..i]).into_owned())
-}
-
-/// Strict allow-list for the Original Image Fetcher's network fetch: only
-/// `http://`/`https://` URLs are eligible. Rejects `data:image/...` (already
-/// local — no fetch needed) and `file://`/relative paths (a "network fetch"
-/// of a local path is never correct) alike, so a malformed or hostile
-/// extraction can never reach `curl` with something other than a plain web URL.
-pub fn is_valid_http_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://")
-}
-
 /// Identifies an image payload's real format from its leading bytes,
-/// independent of whatever MIME label a sender (or a `curl`-fetched HTTP
-/// response's `Content-Type`, which this function never even looks at)
-/// claims. Shared by the ordinary Wayland ingestion path and the Original
-/// Image Fetcher, so both trust the bytes, never the label.
+/// independent of whatever MIME label a sender claims — the ingestion path
+/// trusts the bytes, never the label.
 pub fn detect_image_mime(data: &[u8]) -> Option<&'static str> {
     if data.len() >= 4 {
         match &data[0..4] {
@@ -165,10 +124,9 @@ pub fn detect_image_mime(data: &[u8]) -> Option<&'static str> {
     (head.starts_with(b"<?xml") || head.starts_with(b"<svg")).then_some("image/svg+xml")
 }
 
-/// Image Hijacker quality fix: a `curl` download (or, less often, a
-/// compositor transfer) can lose its final bytes to a dropped connection or
-/// a truncating proxy without that failure ever surfacing as a non-zero
-/// exit code or an empty response — the payload just silently ends early.
+/// Truncation-repair fix: a compositor transfer can lose its final bytes to
+/// a dropped connection without that failure ever surfacing as an empty
+/// response — the payload just silently ends early.
 /// This detects the three formats with a fixed, well-known trailer and
 /// appends it when missing, so a subtly-truncated download still decodes
 /// instead of failing (or worse, half-rendering) in whatever application
@@ -186,49 +144,6 @@ pub fn sanitize_image_payload(mut data: Vec<u8>, mime: &str) -> Vec<u8> {
         _ => {}
     }
     data
-}
-
-/// Runs `curl` as a child process to fetch `url`'s raw bytes for the
-/// Original Image Fetcher. `-sL` suppresses curl's own progress output and
-/// follows redirects (a source URL captured from `text/html` is very often
-/// a CDN redirect, not the final asset); `--max-time`/`--connect-timeout`
-/// bound how long a stalled server can hold up the fetch; `--max-filesize`
-/// aborts the transfer before a hostile response can allocate unbounded
-/// memory; `--user-agent` avoids the hotlink-protection 403 some CDNs
-/// (Cloudflare, Pixiv, ...) return to obviously non-browser clients.
-///
-/// `Command::output()` buffers curl's entire stdout in memory before this
-/// returns — `--max-filesize` is what keeps that bounded, not this
-/// function's own logic.
-pub fn fetch_image_via_curl(url: &str) -> Result<Vec<u8>, String> {
-    let output = std::process::Command::new("curl")
-        .arg("-sL")
-        .arg("--max-time")
-        .arg(crate::core::constants::CURL_TIMEOUT_SECS.to_string())
-        .arg("--connect-timeout")
-        .arg("3")
-        .arg("--max-filesize")
-        .arg(crate::core::constants::MAX_IMAGE_FETCH_SIZE.to_string())
-        .arg("--user-agent")
-        .arg(crate::core::constants::FETCH_USER_AGENT)
-        .arg(url)
-        .output()
-        .map_err(|e| format!("curl spawn failed: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!("curl exited with {}", output.status));
-    }
-    if output.stdout.is_empty() {
-        return Err("curl returned an empty response".to_string());
-    }
-    // Belt-and-suspenders: `--max-filesize` should already have aborted the
-    // transfer before this point, but a size ceiling enforced entirely by an
-    // external process is never trusted without also checking it here.
-    if output.stdout.len() > crate::core::constants::MAX_IMAGE_FETCH_SIZE {
-        return Err("fetched payload exceeds MAX_IMAGE_FETCH_SIZE".to_string());
-    }
-
-    Ok(output.stdout)
 }
 
 /// True when `mime`'s base type (see `parse_mime`) matches one of the
@@ -565,79 +480,6 @@ mod tests {
         let (base, params) = parse_mime("Text/Plain ; charset=UTF-8 ; foo=bar");
         assert_eq!(base, "text/plain");
         assert_eq!(params, vec!["charset=UTF-8", "foo=bar"]);
-    }
-
-    #[test]
-    fn extract_image_url_double_quoted() {
-        let html = br#"<img src="https://example.com/a.png" alt="cat">"#;
-        assert_eq!(extract_image_url_from_html(html).unwrap(), "https://example.com/a.png");
-    }
-
-    #[test]
-    fn extract_image_url_single_quoted() {
-        let html = br#"<img src='https://example.com/a.png'>"#;
-        assert_eq!(extract_image_url_from_html(html).unwrap(), "https://example.com/a.png");
-    }
-
-    #[test]
-    fn extract_image_url_case_insensitive_tag_and_attr() {
-        let html = br#"<IMG SRC="https://Example.com/A.png">"#;
-        // Extraction is case-insensitive when *finding* `<img`/`src=`, but
-        // the returned URL is sliced from the original bytes, so its own
-        // casing must come through untouched.
-        assert_eq!(extract_image_url_from_html(html).unwrap(), "https://Example.com/A.png");
-    }
-
-    #[test]
-    fn extract_image_url_attribute_order_irrelevant() {
-        let html = br#"<img alt="x" width="10" src="https://example.com/b.jpg" height="10">"#;
-        assert_eq!(extract_image_url_from_html(html).unwrap(), "https://example.com/b.jpg");
-    }
-
-    #[test]
-    fn extract_image_url_stops_at_tag_boundary() {
-        // A `src=` belonging to a second, later tag must never be picked up
-        // for the first <img> — the search is bounded by the first tag's
-        // own closing '>'.
-        let html = br#"<img alt="no src here"><a src="https://wrong.example/">text</a>"#;
-        assert_eq!(extract_image_url_from_html(html), None);
-    }
-
-    #[test]
-    fn extract_image_url_no_img_tag() {
-        assert_eq!(extract_image_url_from_html(b"<p>no image here</p>"), None);
-    }
-
-    #[test]
-    fn extract_image_url_missing_src() {
-        assert_eq!(extract_image_url_from_html(br#"<img alt="no source">"#), None);
-    }
-
-    #[test]
-    fn extract_image_url_unterminated_quote() {
-        assert_eq!(extract_image_url_from_html(br#"<img src="https://example.com/a.png>"#), None);
-    }
-
-    #[test]
-    fn extract_image_url_data_uri_passes_through_unfiltered() {
-        // Extraction itself doesn't judge the scheme — that's
-        // `is_valid_http_url`'s job (see the safety-net tests below).
-        let html = br#"<img src="data:image/png;base64,AAAA">"#;
-        assert_eq!(extract_image_url_from_html(html).unwrap(), "data:image/png;base64,AAAA");
-    }
-
-    #[test]
-    fn is_valid_http_url_accepts_http_and_https() {
-        assert!(is_valid_http_url("http://example.com/a.png"));
-        assert!(is_valid_http_url("https://example.com/a.png"));
-    }
-
-    #[test]
-    fn is_valid_http_url_rejects_non_network_schemes() {
-        assert!(!is_valid_http_url("data:image/png;base64,AAAA"));
-        assert!(!is_valid_http_url("file:///etc/passwd"));
-        assert!(!is_valid_http_url("/relative/path.png"));
-        assert!(!is_valid_http_url(""));
     }
 
     #[test]

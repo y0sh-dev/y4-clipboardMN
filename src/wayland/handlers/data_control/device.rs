@@ -71,22 +71,6 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
 
             let is_image = mime_to_get.to_ascii_lowercase().starts_with("image/");
 
-            // Original Image Fetcher: when a browser offers an image alongside
-            // HTML containing an <img> tag pointing to the original asset, attempt
-            // to fetch the high-fidelity original when enabled via configuration.
-            if is_image
-                && state.config.should_hijack_image()
-                && mimes.iter().any(|m| crate::core::utils::mime_base_eq(m, "text/html"))
-                && let Some(tx) = state.job_tx.clone()
-            {
-                let conn = conn.clone();
-                let config = state.config.clone();
-                std::thread::spawn(move || {
-                    fetch_original_image(offer, conn, mime_to_get, tx, config);
-                });
-                return;
-            }
-
             // Initialize data transfer pipe
             let (read_file, write_fd) = match make_pipe(is_image) {
                 Some(p) => p,
@@ -132,11 +116,8 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
 /// `core::utils::detect_image_mime`), and forwards the finished
 /// `ClipboardJob` to the DbWorker.
 ///
-/// Factored out of the Selection handler so both the ordinary ingestion
-/// path (which spawns a dedicated thread per selection) and the Original
-/// Image Fetcher's fallback (`fallback_receive_image`, called from a thread
-/// it's already running on) reach identical read/hash/send behavior without
-/// duplicating it — this function itself never spawns anything.
+/// Factored out of the Selection handler so it can be called from the
+/// dedicated per-selection thread the handler spawns.
 fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>, config: &Config) {
     let source_app = crate::wayland::active_app::detect_active_app();
     if config.is_app_ignored(source_app.as_deref()) { return; }
@@ -197,67 +178,3 @@ fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: b
     unsafe { libc::malloc_trim(0); }
 }
 
-/// Standard image ingestion fallback: requests `image_mime` over a pipe,
-/// reads the payload, repairs headers if needed, and forwards to the worker.
-fn fallback_receive_image(offer: ExtDataControlOfferV1, conn: Connection, image_mime: String, job_tx: &mpsc::Sender<ClipboardJob>, config: &Config) {
-    let Some((read_file, write_fd)) = make_pipe(true) else { return; };
-    offer.receive(image_mime.clone(), write_fd.as_fd());
-    drop(write_fd);
-    let _ = conn.flush();
-    ingest_and_send(read_file, image_mime, false, job_tx, config);
-}
-
-/// Original Image Fetcher: when a browser selection offers both an image
-/// and `text/html`, attempts to fetch the high-resolution source via `curl`.
-///
-/// Runs on a dedicated thread so network I/O never blocks the main Wayland loop.
-fn fetch_original_image(offer: ExtDataControlOfferV1, conn: Connection, image_mime: String, job_tx: mpsc::Sender<ClipboardJob>, config: Arc<Config>) {
-    let source_app = crate::wayland::active_app::detect_active_app();
-    if config.is_app_ignored(source_app.as_deref()) { return; }
-
-    let Some((html_read, html_write)) = make_pipe(false) else {
-        fallback_receive_image(offer, conn, image_mime, &job_tx, &config);
-        return;
-    };
-    offer.receive("text/html".to_string(), html_write.as_fd());
-    drop(html_write);
-    let _ = conn.flush();
-
-    let mut html_payload = Vec::new();
-    let mut reader = html_read.take(268435456);
-    let _ = reader.read_to_end(&mut html_payload);
-
-    let fetched = crate::core::utils::extract_image_url_from_html(&html_payload)
-        .filter(|url| crate::core::utils::is_valid_http_url(url))
-        .and_then(|url| crate::core::utils::fetch_image_via_curl(&url).ok())
-        .and_then(|bytes| crate::core::utils::detect_image_mime(&bytes).map(|mime| (bytes, mime)));
-
-    match fetched {
-        // Original bytes recovered — done. `offer.receive(image_mime, ...)`
-        // is never called in this branch, so the browser's own re-encoded
-        // bitmap is never separately received or stored alongside it (no
-        // duplicate save — see the requirement doc's section 2.3.1).
-        Some((data, mime)) => {
-            // Sanitize before hashing: the hash persisted to SQLite, the
-            // cache filename, and the bytes served back on `copy-to` must
-            // all be computed from the exact same (possibly-repaired) data.
-            let data = crate::core::utils::sanitize_image_payload(data, mime);
-            let mut hasher = Sha3_256::new();
-            hasher.update(&data);
-            let hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
-            let _ = job_tx.send(ClipboardJob { mime: mime.to_string(), data, hash, source_app });
-
-            // SAFETY: `malloc_trim(0)` only requests the allocator release
-            // free pages back to the OS; it doesn't touch any live
-            // allocation this thread holds.
-            #[cfg(target_os = "linux")]
-            unsafe { libc::malloc_trim(0); }
-        }
-        // No <img> URL, a non-http(s) URL (relative path, data:image/...),
-        // a failed/timed-out/non-zero curl run, or a response that isn't
-        // actually an image — every one of these falls back identically,
-        // with nothing surfaced to the user: the clipboard event is still
-        // serviced, just via the ordinary Wayland receive path.
-        None => fallback_receive_image(offer, conn, image_mime, &job_tx, &config),
-    }
-}
