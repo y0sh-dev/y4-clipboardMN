@@ -160,23 +160,6 @@ pub const UNIVERSAL_TRACKING_KEYS: &[&str] = &[
 pub const INTERFACE_MANAGER: &str = "ext_data_control_manager_v1";
 pub const INTERFACE_SEAT:    &str = "wl_seat";
 
-// --- Original Image Fetcher ---
-// Network parameters for fetching original remote image sources when
-// enabled via `[image] hijack_original` in `y4p.toml`.
-
-// `curl`'s `--max-time`: bounds how long a stalled/slow server can
-// hold up the fetch. The fetch itself always runs off the daemon's main
-// poll loop (see device.rs), but a runaway child process is still a leak of
-// threads and file descriptors worth capping.
-pub const CURL_TIMEOUT_SECS: u64 = 5;
-// `curl`'s `--max-filesize`, in bytes: caps a hostile or misbehaving server
-// from turning a clipboard paste into an unbounded memory allocation.
-pub const MAX_IMAGE_FETCH_SIZE: usize = 104_857_600;
-// Some CDNs (Cloudflare, Pixiv, ...) reject non-browser-looking clients with
-// a 403 rather than serve the image — this mimics a real desktop Chrome.
-pub const FETCH_USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
 // --- Logging & Notification Messages ---
 pub const LOG_INFO:  &str = "info: ";
 pub const LOG_WARN:  &str = "warn: ";

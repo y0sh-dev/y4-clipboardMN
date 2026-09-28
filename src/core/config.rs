@@ -25,13 +25,6 @@ impl Default for GeneralConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct ImageConfig {
-    /// When enabled, fetches the original remote image referenced by HTML offers.
-    /// Defaults to `false` to avoid ambient network requests without opt-in.
-    pub hijack_original: bool,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct SanitizeConfig {
     pub strip_tracking: bool,
@@ -64,7 +57,6 @@ pub struct AppConfig {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Config {
     pub general: GeneralConfig,
-    pub image: ImageConfig,
     pub sanitize: SanitizeConfig,
     pub mime: MimeConfig,
     pub app: AppConfig,
@@ -146,10 +138,6 @@ impl Config {
     /// specifically listed in `[app] bypass_sanitize`.
     pub fn should_bypass_sanitize(&self, app_id: Option<&str>) -> bool {
         !self.sanitize.strip_tracking || list_contains_ignore_case(&self.app.bypass_sanitize, app_id)
-    }
-
-    pub fn should_hijack_image(&self) -> bool {
-        self.image.hijack_original
     }
 
     pub fn should_drop_rtf(&self) -> bool {
@@ -246,9 +234,6 @@ fn apply_kv(config: &mut Config, section: &str, key: &str, value: &str) {
         ("general", "max_history") => {
             if let Some(n) = parse_usize(value) { config.general.max_history = n; }
         }
-        ("image", "hijack_original") => {
-            if let Some(b) = parse_bool(value) { config.image.hijack_original = b; }
-        }
         ("sanitize", "strip_tracking") => {
             if let Some(b) = parse_bool(value) { config.sanitize.strip_tracking = b; }
         }
@@ -300,7 +285,6 @@ mod tests {
     fn default_matches_the_agreed_balanced_defaults() {
         let config = Config::default();
         assert_eq!(config.general.max_history, DEFAULT_MAX_HISTORY);
-        assert!(!config.image.hijack_original);
         assert!(config.sanitize.strip_tracking);
         assert!(config.mime.drop_rtf);
         assert!(config.mime.downgrade_html);
@@ -315,9 +299,6 @@ mod tests {
         let toml = r#"
             [general]
             max_history = 1000
-
-            [image]
-            hijack_original = false
 
             [sanitize]
             strip_tracking = true
@@ -339,7 +320,6 @@ mod tests {
 
         let config = Config::parse(toml);
         assert_eq!(config.general.max_history, 1000);
-        assert!(!config.image.hijack_original);
         assert!(config.sanitize.strip_tracking);
         assert!(config.mime.drop_rtf);
         assert!(config.mime.downgrade_html);
@@ -472,13 +452,6 @@ ignore = ["weird#app-id"]"#;
     }
 
     // --- the remaining should_* accessors ---
-
-    #[test]
-    fn should_hijack_image_mirrors_the_image_config_field() {
-        assert!(!Config::default().should_hijack_image());
-        let config = Config { image: ImageConfig { hijack_original: true }, ..Default::default() };
-        assert!(config.should_hijack_image());
-    }
 
     #[test]
     fn should_drop_rtf_mirrors_the_mime_config_field() {
