@@ -26,14 +26,7 @@ impl DbWorker {
                     Ok(_) => {
                         metrics.record_ingress();
                         if verbose {
-                            let mut line = log_save(&job.mime, job.data.len());
-                            // Advisory source application (in-memory only) logged in verbose mode.
-                            if let Some(app) = &job.source_app {
-                                line.push_str(" from [");
-                                line.push_str(app);
-                                line.push(']');
-                            }
-                            println!("{}", line);
+                            println!("{}", log_save(&job.mime, job.data.len()));
                         }
                     }
                     Err(e) => eprintln!("{}worker failed to persist data: {}", LOG_ERROR, e),
