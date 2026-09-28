@@ -8,7 +8,7 @@
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://rust-lang.org)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Wayland-lightgerm.svg)](https://wayland.freedesktop.org)
-[![Version](https://img.shields.io/badge/version-0.3.5-green.svg)](https://github.com/y0sh-dev/y4p/releases/latest)
+[![Version](https://img.shields.io/badge/version-0.4.0-green.svg)](https://github.com/y0sh-dev/y4p/releases/latest)
 
 `y4p` is a standalone clipboard manager, built natively for Wayland.
 
@@ -94,7 +94,7 @@ y4p help
 
 `y4p` works out of the box with sensible defaults and zero mandatory configuration.
 
-To customise behaviour — such as URL tracking parameter sanitisation, history limits, MIME filtering, or per-application exclusion rules — place a `y4p.toml` file at `$XDG_CONFIG_HOME/y4p/y4p.toml` (defaulting to `~/.config/y4p/y4p.toml`).
+To customise behaviour — such as history limits or MIME filtering — place a `y4p.toml` file at `$XDG_CONFIG_HOME/y4p/y4p.toml` (defaulting to `~/.config/y4p/y4p.toml`).
 
 A documented reference template is provided in [`y4p.toml.example`](y4p.toml.example):
 
