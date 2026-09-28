@@ -29,8 +29,7 @@ When a Wayland application sets a new clipboard selection, the compositor emits 
              |-- Select richest format (MIME_PRIORITY_ORDER)
              |
              v
- [Stage 4: Payload Acquisition & Image Hijacking]
-             |-- Image + HTML offer? Fetch original via curl (if enabled)
+ [Stage 4: Payload Acquisition]
              \-- Standard Pipe Transfer: 64 KiB page-aligned streaming
              |
              v
@@ -53,38 +52,9 @@ When a Wayland application sets a new clipboard selection, the compositor emits 
 
 ---
 
-## 2. Image Hijacking & Dynamic Egress Transcoding
+## 2. Dynamic Egress Transcoding
 
-### The Browser Re-encoding Dilemma
-
-When a user executes "Copy Image" in a web browser, the browser rarely places the original image asset onto the clipboard. Instead, it decodes the remote WebP, AVIF, or JPEG into an uncompressed bitmap, re-encodes it into an unoptimised PNG, and writes that PNG to the Wayland selection pipe.
-
-This introduces two severe penalties:
-- **Loss of fidelity & bloat**: A 200 KiB WebP image can balloon into a 15 MiB uncompressed PNG clipboard transfer.
-- **Lost source metadata**: Animated GIFs or vectors lose their original format characteristics.
-
-However, browsers almost universally advertise a companion `text/html` MIME type containing an `<img>` tag pointing directly to the source URL:
-
-```html
-<!-- Browser clipboard HTML payload -->
-<meta http-equiv="content-type" content="text/html; charset=utf-8">
-<img src="https://example.com/assets/original_illustration.webp" alt="...">
-```
-
-### The Image Hijacker (`[image] hijack_original`)
-
-When `[image] hijack_original = true` is configured, `y4p` intercepts this pattern:
-
-1. **Asynchronous inspection**: The daemon spawns a dedicated worker thread, keeping the main `libc::poll` loop completely non-blocking.
-2. **Tag extraction**: A zero-dependency byte scanner extracts the target URL from the `src` attribute of the first `<img>` tag.
-3. **Strict URL validation**: Only explicit `http://` and `https://` schemes are accepted. Local `file://`, relative paths, and embedded `data:` URIs are rejected outright.
-4. **Bounded fetch**: The thread invokes `curl` with rigorous defensive limits:
-   - `--max-time 5`: Prevents slow-loris server attacks from tying up threads.
-   - `--max-filesize 104857600` (100 MiB): Guards against memory exhaustion.
-   - `--proto =http,https`: Disables dangerous protocol redirects (e.g. `gopher://`, `file://`).
-5. **Safe fallback**: If the network request fails, times out, or returns a non-image content type, the worker seamlessly falls back to requesting the standard image pipe from the Wayland offer.
-
-### Dynamic Egress Transcoding
+`y4p` never fetches or transcodes image data over the network — clipboard managers must not perform network communication, full stop. Whatever bytes the compositor hands `y4p` on ingestion (including a browser's own re-encoded bitmap for "Copy Image") are what get stored and, ultimately, pasted back out.
 
 Rather than transcoding images upon ingestion—which burns CPU cycles and alters original files—`y4p` stores the ingested binary payload *exactly as received* in its deduplicated filesystem cache (`~/.cache/y4p/`).
 
