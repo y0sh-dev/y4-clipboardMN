@@ -15,7 +15,7 @@ use sha3::{Digest, Sha3_256};
 use crate::wayland::state::{WaylandState, OfferData, ClipboardJob};
 use crate::core::constants::*;
 use crate::core::config::Config;
-use super::{make_pipe, is_sensitive, AlignedBuffer};
+use super::{make_pipe, is_sensitive};
 
 impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
     fn event(state: &mut Self, _: &ExtDataControlDeviceV1, ev: ext_data_control_device_v1::Event, _: &(), conn: &Connection, _: &QueueHandle<Self>) {
@@ -69,10 +69,8 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
             let Some(mime_to_get) = mime_to_get else { return; };
             if drop_rtf && crate::core::utils::is_rtf_mime(&mime_to_get) { return; }
 
-            let is_image = mime_to_get.to_ascii_lowercase().starts_with("image/");
-
             // Initialize data transfer pipe
-            let (read_file, write_fd) = match make_pipe(is_image) {
+            let (read_file, write_fd) = match make_pipe() {
                 Some(p) => p,
                 None => return,
             };
@@ -119,21 +117,10 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
 /// Factored out of the Selection handler so it can be called from the
 /// dedicated per-selection thread the handler spawns.
 fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>, config: &Config) {
-    let mut payload = Vec::with_capacity(1048576);
+    let mut payload = Vec::new();
     let mut reader = read_file.take(268435456);
 
-    // Malformed size/align is unreachable with these fixed literals, but
-    // skip this one ingestion job rather than unwind if it ever weren't
-    // (see `AlignedBuffer::new`).
-    let Some(mut chunk_buffer) = AlignedBuffer::new(65536, 4096) else { return; };
-    let chunk = chunk_buffer.as_mut_slice();
-
-    while let Ok(n) = reader.read(chunk) {
-        if n == 0 { break; }
-        payload.extend_from_slice(&chunk[..n]);
-    }
-
-    if payload.is_empty() { return; }
+    if reader.read_to_end(&mut payload).is_err() || payload.is_empty() { return; }
     let mut final_mime = mime_to_get;
 
     if is_uri_list {
@@ -155,11 +142,5 @@ fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: b
 
     // Send the completed payload and its SHA3 fingerprint to the persistent worker.
     let _ = job_tx.send(ClipboardJob { mime: final_mime, data: payload, hash });
-
-    // SAFETY: `malloc_trim(0)` only requests the allocator release free
-    // pages back to the OS; it doesn't touch any live allocation this
-    // thread holds.
-    #[cfg(target_os = "linux")]
-    unsafe { libc::malloc_trim(0); }
 }
 
