@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::wayland::state::{WaylandState, SourceMetadata, SourcePayload};
 use super::mime_is_compatible;
 use crate::core::constants::*;
-use crate::core::utils::strip_html_tags;
+use crate::core::utils::{is_html_mime, strip_html_tags};
 
 // --- ExtDataControlSourceV1 ---
 
@@ -58,8 +58,8 @@ impl Dispatch<ExtDataControlSourceV1, SourceMetadata> for WaylandState {
                             // so a non-HTML consumer gets readable text instead
                             // of raw markup; requesting the markup mime itself
                             // still gets the original bytes untouched.
-                            let is_rich_markup = meta.mime == "text/html" || meta.mime == "application/xhtml+xml";
-                            let wants_markup = mime_type.starts_with("text/html") || mime_type.starts_with("application/xhtml");
+                            let is_rich_markup = is_html_mime(&meta.mime);
+                            let wants_markup = is_html_mime(&mime_type);
                             let data_to_send = if is_rich_markup && !wants_markup {
                                 strip_html_tags(data)
                             } else {

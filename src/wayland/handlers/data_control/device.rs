@@ -14,7 +14,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use sha3::{Digest, Sha3_256};
 use crate::wayland::state::{WaylandState, OfferData, ClipboardJob};
 use crate::core::constants::*;
-use crate::core::config::Config;
 use super::{make_pipe, is_sensitive};
 
 impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
@@ -45,29 +44,12 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
 
             if mimes.is_empty() || is_sensitive(&mimes) { return; }
 
-            // Determine optimal MIME type based on MIME_PRIORITY_ORDER
-            // (richest/most-reproducible first). Matching is case- and
-            // whitespace-insensitive on the base type (see
-            // core::utils::mime_base_eq), so a sender announcing e.g.
-            // "TEXT/Plain" or "text/plain; charset=utf-8" (space after ';')
-            // still hits its intended priority entry instead of falling
-            // through to a generic category fallback. `.cloned()` always
-            // takes the string as the sender actually offered it — the
-            // compositor request below needs that exact original form, not
-            // the normalised one.
-            // Check whether RTF is excluded from selection. When enabled via
-            // `[mime] drop_rtf`, RTF is ignored in favour of other alternatives.
+            // Determine which offered MIME to request: a specific one if
+            // `y4p paste-from <mime>` is waiting for it (Action Mode), or the
+            // richest/most-reproducible one by `MIME_PRIORITY_ORDER`
+            // otherwise (daemon ingestion) — see `select_mime`.
             let drop_rtf = state.config.should_drop_rtf();
-
-            let mime_to_get = MIME_PRIORITY_ORDER.iter()
-                .find_map(|&p| mimes.iter().find(|m| crate::core::utils::mime_base_eq(m, p)))
-                .cloned()
-                .or_else(|| mimes.iter().find(|m| m.to_ascii_lowercase().starts_with("image/")).cloned())
-                .or_else(|| mimes.iter().find(|m| m.to_ascii_lowercase().starts_with("text/") && (!drop_rtf || !crate::core::utils::is_rtf_mime(m))).cloned())
-                .or_else(|| mimes.iter().find(|m| !drop_rtf || !crate::core::utils::is_rtf_mime(m)).cloned());
-
-            let Some(mime_to_get) = mime_to_get else { return; };
-            if drop_rtf && crate::core::utils::is_rtf_mime(&mime_to_get) { return; }
+            let Some(mime_to_get) = select_mime(&mimes, state.target_mime.as_deref(), drop_rtf) else { return; };
 
             // Initialize data transfer pipe
             let (read_file, write_fd) = match make_pipe() {
@@ -88,10 +70,9 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
                 // persisted), so it can't share the other MIMEs' single-pass
                 // hash-while-read below.
                 let is_uri_list = mime_to_get == MIME_URI_LIST;
-                let config = state.config.clone();
 
                 std::thread::spawn(move || {
-                    ingest_and_send(read_file, mime_to_get, is_uri_list, &job_tx_clone, &config);
+                    ingest_and_send(read_file, mime_to_get, is_uri_list, &job_tx_clone);
                 });
             } else {
                 // Action Mode: Synchronous read for immediate CLI processing
@@ -109,6 +90,35 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
     ]);
 }
 
+/// Chooses which of an offer's `mimes` to request from the compositor.
+///
+/// `target_mime` is `Some` only in Action Mode (`y4p paste-from <mime>`
+/// waits for one specific MIME): the matching offer is found via
+/// `core::utils::mime_base_eq` (case- and whitespace-insensitive, parameters
+/// ignored), so a sender announcing e.g. "TEXT/Plain" or
+/// "text/plain; charset=utf-8" still satisfies a request for "text/plain".
+/// `drop_rtf` is not consulted here — an explicit request names exactly the
+/// MIME the caller wants, RTF included, and that request is honoured as-is.
+///
+/// `target_mime` is `None` in daemon ingestion, where no single MIME is
+/// being awaited: the richest/most-reproducible offer is chosen via
+/// `MIME_PRIORITY_ORDER`, falling back through images, then plain text,
+/// then anything at all. `drop_rtf` (`[mime] drop_rtf` in `y4p.toml`) is
+/// applied at every step of this fallback chain, so RTF is never selected
+/// when it's enabled, even as the last-resort catch-all.
+pub(crate) fn select_mime(mimes: &[String], target_mime: Option<&str>, drop_rtf: bool) -> Option<String> {
+    if let Some(target) = target_mime {
+        return mimes.iter().find(|m| crate::core::utils::mime_base_eq(m, target)).cloned();
+    }
+
+    MIME_PRIORITY_ORDER.iter()
+        .find_map(|&p| mimes.iter().find(|m| crate::core::utils::mime_base_eq(m, p)))
+        .cloned()
+        .or_else(|| mimes.iter().find(|m| m.to_ascii_lowercase().starts_with("image/")).cloned())
+        .or_else(|| mimes.iter().find(|m| m.to_ascii_lowercase().starts_with("text/") && (!drop_rtf || !crate::core::utils::is_rtf_mime(m))).cloned())
+        .or_else(|| mimes.iter().find(|m| !drop_rtf || !crate::core::utils::is_rtf_mime(m)).cloned())
+}
+
 /// Reads a MIME payload from an already-`offer.receive()`d pipe, hashes it
 /// (re-identifying images by magic bytes along the way — see
 /// `core::utils::detect_image_mime`), and forwards the finished
@@ -116,7 +126,7 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
 ///
 /// Factored out of the Selection handler so it can be called from the
 /// dedicated per-selection thread the handler spawns.
-fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>, config: &Config) {
+fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>) {
     let mut payload = Vec::new();
     let mut reader = read_file.take(268435456);
 
@@ -128,11 +138,6 @@ fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: b
         if payload.is_empty() { return; }
     } else if let Some(m) = crate::core::utils::detect_image_mime(&payload) {
         final_mime = m.to_string();
-    } else if crate::core::utils::is_html_mime(&final_mime) && config.should_downgrade_html() {
-        // Strip HTML tags when no plain-text alternative was offered alongside markup.
-        payload = crate::core::utils::strip_html_tags(&payload);
-        if payload.is_empty() { return; }
-        final_mime = DEFAULT_MIME.to_string();
     }
 
     // SHA3-256 fingerprint of the final normalised payload actually being persisted.
@@ -142,5 +147,90 @@ fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: b
 
     // Send the completed payload and its SHA3 fingerprint to the persistent worker.
     let _ = job_tx.send(ClipboardJob { mime: final_mime, data: payload, hash });
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn mimes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn select_mime_requested_match_is_returned_verbatim() {
+        let offers = mimes(&["text/plain", "text/html"]);
+        assert_eq!(select_mime(&offers, Some("text/html"), true), Some("text/html".to_string()));
+    }
+
+    #[test]
+    fn select_mime_absent_requested_mime_returns_none() {
+        let offers = mimes(&["text/plain", "text/html"]);
+        assert_eq!(select_mime(&offers, Some("application/pdf"), true), None);
+    }
+
+    #[test]
+    fn select_mime_requested_match_is_case_and_param_insensitive() {
+        let offers = mimes(&["TEXT/Plain; charset=UTF-8"]);
+        assert_eq!(select_mime(&offers, Some("text/plain"), true), Some("TEXT/Plain; charset=UTF-8".to_string()));
+    }
+
+    #[test]
+    fn select_mime_requested_rtf_is_honoured_even_when_drop_rtf_enabled() {
+        // An explicit `paste-from text/rtf` request names exactly what the
+        // caller wants; `drop_rtf` only governs the daemon's own fallback
+        // chain (target_mime = None), never an explicit request.
+        let offers = mimes(&["text/rtf"]);
+        assert_eq!(select_mime(&offers, Some("text/rtf"), true), Some("text/rtf".to_string()));
+    }
+
+    #[test]
+    fn select_mime_daemon_fallback_prefers_priority_order() {
+        let offers = mimes(&["text/html", "image/png", "text/plain"]);
+        assert_eq!(select_mime(&offers, None, true), Some("image/png".to_string()));
+    }
+
+    #[test]
+    fn select_mime_daemon_fallback_matches_lower_ranked_priority_entry() {
+        // "text/html" is still in MIME_PRIORITY_ORDER, just ranked below
+        // plain text and images — with nothing higher-ranked on offer, it's
+        // still reached via the priority list itself, not the catch-all.
+        let offers = mimes(&["text/html"]);
+        assert_eq!(select_mime(&offers, None, true), Some("text/html".to_string()));
+    }
+
+    #[test]
+    fn select_mime_daemon_fallback_catch_all_for_unlisted_mime() {
+        // Not in MIME_PRIORITY_ORDER, and neither an "image/" nor "text/"
+        // prefix — only the final unconditional catch-all reaches it.
+        let offers = mimes(&["application/octet-stream"]);
+        assert_eq!(select_mime(&offers, None, true), Some("application/octet-stream".to_string()));
+    }
+
+    #[test]
+    fn select_mime_drop_rtf_excludes_rtf_from_daemon_fallback() {
+        let offers = mimes(&["text/rtf"]);
+        assert_eq!(select_mime(&offers, None, true), None);
+    }
+
+    #[test]
+    fn select_mime_rtf_allowed_in_daemon_fallback_when_drop_rtf_disabled() {
+        let offers = mimes(&["text/rtf"]);
+        assert_eq!(select_mime(&offers, None, false), Some("text/rtf".to_string()));
+    }
+
+    #[test]
+    fn select_mime_drop_rtf_skips_rtf_in_favour_of_other_text() {
+        let offers = mimes(&["text/rtf", "text/markdown"]);
+        assert_eq!(select_mime(&offers, None, true), Some("text/markdown".to_string()));
+    }
+
+    #[test]
+    fn select_mime_empty_offer_list_returns_none() {
+        let offers: Vec<String> = Vec::new();
+        assert_eq!(select_mime(&offers, None, true), None);
+        assert_eq!(select_mime(&offers, Some("text/plain"), true), None);
+    }
 }
 

@@ -29,8 +29,7 @@ When a Wayland application sets a new clipboard selection, the compositor emits 
              |
              v
  [Stage 4: Normalisation]
-             |-- URI-List: normalise percent-encoding & file:// schemes
-             \-- HTML Downgrade: strip markup if text/plain missing
+             \-- URI-List: normalise percent-encoding & file:// schemes
              |
              v
  [Stage 5: SHA3-256 Fingerprint & Worker Dispatch]
@@ -41,7 +40,7 @@ When a Wayland application sets a new clipboard selection, the compositor emits 
 
 1. **Discard before allocation**: Checking sensitive hints occurs before opening pipes or allocating memory buffers. If an offer originates from a password manager, `y4p` drops it immediately at zero I/O cost.
 2. **MIME priority over raw offers**: Electron and Chromium applications routinely offer `text/html` alongside `text/plain`, but only synthesise HTML on demand. Requesting `text/html` first can yield an empty transfer. `y4p` prioritises high-fidelity images, standard text, and structured fallbacks in a deterministic sequence (`MIME_PRIORITY_ORDER`).
-3. **Fingerprint after normalisation**: SHA3-256 hashing happens *after* URI-list normalisation and HTML downgrade, so the persisted hash always matches the persisted bytes. Beyond that, `y4p` stores exactly what it received — no repair, no rewriting, no re-encoding.
+3. **Never mutate user data on ingress**: SHA3-256 hashing happens *after* URI-list normalisation (a lossless encoding fix, not a content change), so the persisted hash always matches the persisted bytes. Beyond that, `y4p` stores exactly what it received — no repair, no rewriting, no re-encoding, and critically, no markup stripping: a `text/html` offer is persisted byte-for-byte. `strip_html_tags` is reserved strictly for preview generation and plain-text egress fallback (see `wayland::handlers::data_control::source`), never applied at ingress.
 
 ---
 

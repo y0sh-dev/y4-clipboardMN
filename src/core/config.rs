@@ -28,12 +28,11 @@ impl Default for GeneralConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MimeConfig {
     pub drop_rtf: bool,
-    pub downgrade_html: bool,
 }
 
 impl Default for MimeConfig {
     fn default() -> Self {
-        Self { drop_rtf: true, downgrade_html: true }
+        Self { drop_rtf: true }
     }
 }
 
@@ -110,10 +109,6 @@ impl Config {
     pub fn should_drop_rtf(&self) -> bool {
         self.mime.drop_rtf
     }
-
-    pub fn should_downgrade_html(&self) -> bool {
-        self.mime.downgrade_html
-    }
 }
 
 /// Pure path-building logic factored out of `get_config_path` so it can be
@@ -177,9 +172,6 @@ fn apply_kv(config: &mut Config, section: &str, key: &str, value: &str) {
         ("mime", "drop_rtf") => {
             if let Some(b) = parse_bool(value) { config.mime.drop_rtf = b; }
         }
-        ("mime", "downgrade_html") => {
-            if let Some(b) = parse_bool(value) { config.mime.downgrade_html = b; }
-        }
         _ => {}
     }
 }
@@ -216,7 +208,6 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.general.max_history, DEFAULT_MAX_HISTORY);
         assert!(config.mime.drop_rtf);
-        assert!(config.mime.downgrade_html);
     }
 
     // --- Config::parse: the full agreed schema ---
@@ -229,13 +220,11 @@ mod tests {
 
             [mime]
             drop_rtf = true
-            downgrade_html = true
         "#;
 
         let config = Config::parse(toml);
         assert_eq!(config.general.max_history, 1000);
         assert!(config.mime.drop_rtf);
-        assert!(config.mime.downgrade_html);
     }
 
     #[test]
@@ -306,15 +295,8 @@ mod tests {
     #[test]
     fn should_drop_rtf_mirrors_the_mime_config_field() {
         assert!(Config::default().should_drop_rtf());
-        let config = Config { mime: MimeConfig { drop_rtf: false, downgrade_html: true }, ..Default::default() };
+        let config = Config { mime: MimeConfig { drop_rtf: false }, ..Default::default() };
         assert!(!config.should_drop_rtf());
-    }
-
-    #[test]
-    fn should_downgrade_html_mirrors_the_mime_config_field() {
-        assert!(Config::default().should_downgrade_html());
-        let config = Config { mime: MimeConfig { drop_rtf: true, downgrade_html: false }, ..Default::default() };
-        assert!(!config.should_downgrade_html());
     }
 
     // --- Config::load: safe fallback ---

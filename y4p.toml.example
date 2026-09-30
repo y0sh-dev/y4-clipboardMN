@@ -21,8 +21,3 @@ max_history = 100
 # a corresponding plain text offer is already present, preventing bloat.
 # Default: true
 drop_rtf = true
-
-# Downgrade standalone text/html offers to plain text if the copying client
-# did not provide a text/plain offer, stripping markup tags cleanly.
-# Default: true
-downgrade_html = true
