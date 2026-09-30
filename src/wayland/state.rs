@@ -53,9 +53,7 @@ pub struct WaylandState {
     pub device: Option<ExtDataControlDeviceV1>,
     pub job_tx: Option<mpsc::Sender<ClipboardJob>>,
     pub verbose: bool,
-    pub target_mime: String,
     pub rx_buf: Vec<u8>,
-    pub last_data: Vec<u8>,
     pub provider_locks: u32,
     pub selection_received: bool,
     pub current_source: Option<ExtDataControlSourceV1>,
@@ -81,9 +79,7 @@ impl WaylandState {
             device: None,
             job_tx: Some(job_tx),
             verbose,
-            target_mime: String::new(),
             rx_buf: Vec::new(),
-            last_data: Vec::new(),
             provider_locks: 0,
             selection_received: false,
             current_source: None,
@@ -92,7 +88,7 @@ impl WaylandState {
         }
     }
 
-    pub fn new_action(target_mime: String, verbose: bool, config: Arc<crate::core::config::Config>) -> Self {
+    pub fn new_action(verbose: bool, config: Arc<crate::core::config::Config>) -> Self {
         Self {
             manager: None,
             manager_id: None,
@@ -101,9 +97,7 @@ impl WaylandState {
             device: None,
             job_tx: None,
             verbose,
-            target_mime,
             rx_buf: Vec::new(),
-            last_data: Vec::new(),
             provider_locks: 0,
             selection_received: false,
             current_source: None,

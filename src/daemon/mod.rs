@@ -86,10 +86,6 @@ pub fn start_daemon(mut db: ClipboardDb, verbose: bool) -> bool {
     };
     let mut state = WaylandState::new_daemon(writer.sender(), verbose, config);
 
-    // Pre-load last data for deduplication.
-    state.last_data = read_db.get_latest_data().unwrap_or_default();
-    state.target_mime = DEFAULT_MIME.to_string();
-
     if event_queue.roundtrip(&mut state).is_err() {
         eprintln!("{}{}", LOG_ERROR, MSG_WAYLAND_CONN_FAIL);
         return false;
