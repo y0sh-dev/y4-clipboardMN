@@ -22,7 +22,7 @@ pub fn create_connection() -> Option<(Connection, EventQueue<WaylandState>)> {
 
 /// Extract data from the system clipboard with strict timeout and lifecycle management.
 /// Prevents indefinite hangs by using poll-based non-blocking dispatch.
-pub fn paste_from_os(_mime: &str) -> Vec<u8> {
+pub fn paste_from_os(mime: &str) -> Vec<u8> {
     let Some((conn, mut event_queue)) = create_connection() else { return Vec::new(); };
     let qh = event_queue.handle();
     let _registry = conn.display().get_registry(&qh, ());
@@ -30,7 +30,7 @@ pub fn paste_from_os(_mime: &str) -> Vec<u8> {
     // Initialise in action mode (DB-less). Loading configuration here
     // keeps one-shot paste-from consistent with the daemon's ingestion pipeline.
     let config = std::sync::Arc::new(crate::core::config::Config::load());
-    let mut state = WaylandState::new_action(false, config);
+    let mut state = WaylandState::new_action(mime.to_string(), false, config);
 
     // 1. Synchronize to bind initial protocols (Manager & Seat)
     let _ = event_queue.roundtrip(&mut state);

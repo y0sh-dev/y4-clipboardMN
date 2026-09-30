@@ -53,6 +53,10 @@ pub struct WaylandState {
     pub device: Option<ExtDataControlDeviceV1>,
     pub job_tx: Option<mpsc::Sender<ClipboardJob>>,
     pub verbose: bool,
+    // Action-mode-only: the specific MIME `y4p paste-from <mime>` was asked
+    // for. `None` in daemon mode, where no single MIME is being awaited —
+    // the Selection handler falls back to `MIME_PRIORITY_ORDER` instead.
+    pub target_mime: Option<String>,
     pub rx_buf: Vec<u8>,
     pub provider_locks: u32,
     pub selection_received: bool,
@@ -79,6 +83,7 @@ impl WaylandState {
             device: None,
             job_tx: Some(job_tx),
             verbose,
+            target_mime: None,
             rx_buf: Vec::new(),
             provider_locks: 0,
             selection_received: false,
@@ -88,7 +93,7 @@ impl WaylandState {
         }
     }
 
-    pub fn new_action(verbose: bool, config: Arc<crate::core::config::Config>) -> Self {
+    pub fn new_action(target_mime: String, verbose: bool, config: Arc<crate::core::config::Config>) -> Self {
         Self {
             manager: None,
             manager_id: None,
@@ -97,6 +102,7 @@ impl WaylandState {
             device: None,
             job_tx: None,
             verbose,
+            target_mime: Some(target_mime),
             rx_buf: Vec::new(),
             provider_locks: 0,
             selection_received: false,
