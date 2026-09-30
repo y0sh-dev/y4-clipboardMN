@@ -203,11 +203,6 @@ impl ClipboardDb {
         }
     }
 
-    pub fn get_latest_data(&self) -> Option<Vec<u8>> {
-        let id = self.store.latest_id()?;
-        self.get_content_by_id(id).map(|(_, data)| data)
-    }
-
     /// Update record timestamp. Standardized to &mut self for state consistency.
     pub fn update_timestamp(&mut self, id: i64) -> Result<()> {
         self.store.update_timestamp(id)

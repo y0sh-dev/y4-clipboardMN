@@ -277,13 +277,6 @@ impl SqliteStore {
         ).ok()
     }
 
-    pub fn latest_id(&self) -> Option<i64> {
-        self.conn.query_row(
-            "SELECT id FROM clipboard ORDER BY timestamp DESC LIMIT 1",
-            [], |row| row.get(0)
-        ).ok()
-    }
-
     pub fn update_timestamp(&mut self, id: i64) -> Result<()> {
         let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
         self.conn.execute("UPDATE clipboard SET timestamp = ?1 WHERE id = ?2", params![ts, id])?;
