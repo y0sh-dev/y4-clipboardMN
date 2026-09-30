@@ -14,7 +14,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use sha3::{Digest, Sha3_256};
 use crate::wayland::state::{WaylandState, OfferData, ClipboardJob};
 use crate::core::constants::*;
-use crate::core::config::Config;
 use super::{make_pipe, is_sensitive};
 
 impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
@@ -88,10 +87,9 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
                 // persisted), so it can't share the other MIMEs' single-pass
                 // hash-while-read below.
                 let is_uri_list = mime_to_get == MIME_URI_LIST;
-                let config = state.config.clone();
 
                 std::thread::spawn(move || {
-                    ingest_and_send(read_file, mime_to_get, is_uri_list, &job_tx_clone, &config);
+                    ingest_and_send(read_file, mime_to_get, is_uri_list, &job_tx_clone);
                 });
             } else {
                 // Action Mode: Synchronous read for immediate CLI processing
@@ -116,7 +114,7 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
 ///
 /// Factored out of the Selection handler so it can be called from the
 /// dedicated per-selection thread the handler spawns.
-fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>, config: &Config) {
+fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>) {
     let mut payload = Vec::new();
     let mut reader = read_file.take(268435456);
 
@@ -128,11 +126,6 @@ fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: b
         if payload.is_empty() { return; }
     } else if let Some(m) = crate::core::utils::detect_image_mime(&payload) {
         final_mime = m.to_string();
-    } else if crate::core::utils::is_html_mime(&final_mime) && config.should_downgrade_html() {
-        // Strip HTML tags when no plain-text alternative was offered alongside markup.
-        payload = crate::core::utils::strip_html_tags(&payload);
-        if payload.is_empty() { return; }
-        final_mime = DEFAULT_MIME.to_string();
     }
 
     // SHA3-256 fingerprint of the final normalised payload actually being persisted.
