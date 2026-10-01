@@ -1,6 +1,6 @@
 [package]
 name = "y4p"
-version = "0.4.0"
+version = "0.4.5"
 edition = "2024"
 description = "A robust, unified clipboard manager for Wayland with SQLite storage."
 license = "GPL-3.0-or-later"
@@ -44,4 +44,12 @@ panic = "abort"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+# Promoted from ad-hoc `-W` CLI flags (previously passed by hand to every
+# `cargo clippy` invocation) so the same bar is enforced consistently
+# whether run locally or in CI, without relying on everyone remembering the
+# exact flag set.
+undocumented_unsafe_blocks = "warn"
+cast_lossless = "warn"
+redundant_clone = "warn"
 
