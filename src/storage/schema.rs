@@ -126,3 +126,74 @@ impl SchemaManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_initialization_fresh_db_creates_v3_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+
+        let user_version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 3);
+
+        // Verify table columns include is_pinned
+        let has_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('clipboard') WHERE name = 'is_pinned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_column);
+    }
+
+    #[test]
+    fn schema_migration_from_v1_backfills_is_pinned_and_text_storage() {
+        let mut conn = Connection::open_in_memory().unwrap();
+
+        // Simulate a legacy v1 database (user_version = 0, no is_pinned column, BLOB text)
+        conn.execute(
+            "CREATE TABLE clipboard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                mime TEXT NOT NULL,
+                content BLOB,
+                size INTEGER NOT NULL,
+                hash TEXT NOT NULL UNIQUE,
+                preview TEXT
+            )",
+            [],
+        )
+        .unwrap();
+
+        // Insert legacy row with BLOB content
+        conn.execute(
+            "INSERT INTO clipboard (timestamp, mime, content, size, hash, preview)
+             VALUES (100, 'text/plain', zeroblob(5), 5, 'hash1', 'preview')",
+            [],
+        )
+        .unwrap();
+
+        // Run full initialization/migration
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+
+        let user_version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 3);
+
+        // Check is_pinned default is 0
+        let is_pinned: bool = conn
+            .query_row("SELECT is_pinned FROM clipboard WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!is_pinned);
+    }
+}

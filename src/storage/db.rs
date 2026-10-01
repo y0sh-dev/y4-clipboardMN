@@ -412,3 +412,122 @@ impl SqliteStore {
             .unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::storage::schema::SchemaManager;
+
+    fn setup_test_store() -> SqliteStore {
+        let mut conn = Connection::open_in_memory().unwrap();
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+        SqliteStore::new(conn)
+    }
+
+    #[test]
+    fn upsert_text_and_fetch_metadata() {
+        let mut store = setup_test_store();
+        let outcome = store
+            .upsert_record("text/plain", b"hello world", "hash1", 10)
+            .unwrap();
+        assert_eq!(outcome.real_id, 1);
+        assert!(!outcome.is_image);
+
+        let rows = store.fetch_metadata(10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 1); // id
+        assert_eq!(rows[0].2, "text/plain"); // mime
+        assert_eq!(rows[0].3, 11); // size
+        assert_eq!(rows[0].4.as_deref(), Some("hello world")); // preview
+        assert!(!rows[0].5); // is_pinned
+    }
+
+    #[test]
+    fn upsert_image_stores_null_content_and_flags_is_image() {
+        let mut store = setup_test_store();
+        let img_bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let outcome = store
+            .upsert_record("image/png", &img_bytes, "imghash", 10)
+            .unwrap();
+        assert_eq!(outcome.real_id, 1);
+        assert!(outcome.is_image);
+
+        let (mime, content, hash) = store.get_row_content(1).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(content.is_none()); // Stored out-of-line in FileCache
+        assert_eq!(hash, "imghash");
+    }
+
+    #[test]
+    fn pin_protection_prevents_rotation_eviction() {
+        let mut store = setup_test_store();
+
+        // 1. Insert first record and pin it
+        let o1 = store
+            .upsert_record("text/plain", b"entry 1", "h1", 2)
+            .unwrap();
+        assert!(store.set_pinned(o1.real_id, true).unwrap());
+
+        // 2. Insert second record (unpinned, total unpinned = 1)
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let o2 = store
+            .upsert_record("text/plain", b"entry 2", "h2", 2)
+            .unwrap();
+
+        // 3. Insert third record (unpinned, total unpinned = 2, fills quota)
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let o3 = store
+            .upsert_record("text/plain", b"entry 3", "h3", 2)
+            .unwrap();
+        assert!(o3.expired_hashes.is_empty());
+
+        // 4. Insert fourth record (unpinned, total unpinned = 3, exceeds quota = 2)
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let o4 = store
+            .upsert_record("text/plain", b"entry 4", "h4", 2)
+            .unwrap();
+
+        // Pinned entry 1 must survive; oldest unpinned entry 2 must be evicted
+        assert!(o4.expired_hashes.contains(&"h2".to_string()));
+        assert!(!o4.expired_hashes.contains(&"h1".to_string()));
+
+        let rows = store.fetch_metadata(10);
+        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        assert!(ids.contains(&o1.real_id)); // Pinned row protected!
+        assert!(!ids.contains(&o2.real_id)); // Oldest unpinned row evicted!
+        assert!(ids.contains(&o3.real_id)); // Surviving unpinned row present!
+        assert!(ids.contains(&o4.real_id)); // Newest row present!
+    }
+
+    #[test]
+    fn search_metadata_finds_matching_text() {
+        let mut store = setup_test_store();
+        store
+            .upsert_record("text/plain", b"Rust language", "h1", 10)
+            .unwrap();
+        store
+            .upsert_record("text/plain", b"Python language", "h2", 10)
+            .unwrap();
+
+        let queries = vec!["Rust".to_string()];
+        let results = store.search_metadata(&queries, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.4.as_deref(), Some("Rust language"));
+    }
+
+    #[test]
+    fn delete_and_wipe_operations() {
+        let mut store = setup_test_store();
+        let o1 = store.upsert_record("text/plain", b"foo", "h1", 10).unwrap();
+        let (deleted, hash) = store.delete_by_id(o1.real_id).unwrap();
+        assert!(deleted);
+        assert_eq!(hash, Some("h1".to_string()));
+        assert_eq!(store.get_total_count(), 0);
+
+        store.upsert_record("text/plain", b"bar", "h2", 10).unwrap();
+        assert_eq!(store.get_total_count(), 1);
+        store.wipe().unwrap();
+        assert_eq!(store.get_total_count(), 0);
+    }
+}
