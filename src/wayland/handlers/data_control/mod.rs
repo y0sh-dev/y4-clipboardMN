@@ -6,18 +6,18 @@
 pub mod device;
 pub mod source;
 
-use wayland_client::{Dispatch, Connection, QueueHandle};
+use crate::core::constants::*;
+use crate::wayland::state::{OfferData, WaylandState};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_manager_v1::{self, ExtDataControlManagerV1},
     ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
 };
-use std::os::fd::{FromRawFd, OwnedFd, AsRawFd};
-use crate::wayland::state::{WaylandState, OfferData};
-use crate::core::constants::*;
 
 /// Evaluates if the requested MIME type is compatible with the target type.
 /// Supports category-level matching for the text group. Both sides are
-/// compared via their normalized base type (case- and whitespace-
+/// compared via their normalised base type (case- and whitespace-
 /// insensitive, parameters stripped — see `core::utils::mime_base`), so
 /// `TEXT/PLAIN`, `text/plain; charset=utf-8` and `text/plain;charset=UTF-8`
 /// are all treated identically. Zero allocations throughout.
@@ -44,11 +44,15 @@ fn mime_is_compatible(requested: &str, target: &str) -> bool {
     let req_base = crate::core::utils::mime_base(requested);
     let tgt_base = crate::core::utils::mime_base(target);
 
-    if req_base.eq_ignore_ascii_case(tgt_base) { return true; }
+    if req_base.eq_ignore_ascii_case(tgt_base) {
+        return true;
+    }
 
     let req_is_text_cat = crate::core::utils::starts_with_ignore_ascii_case(req_base, "text/");
     let tgt_is_text_cat = crate::core::utils::starts_with_ignore_ascii_case(tgt_base, "text/");
-    if req_is_text_cat && tgt_is_text_cat { return true; }
+    if req_is_text_cat && tgt_is_text_cat {
+        return true;
+    }
 
     // Symmetric HTML/XHTML markup match: text/html and application/xhtml+xml
     // are both HTML markup, just wrapped differently, so either side being
@@ -69,11 +73,17 @@ fn mime_is_compatible(requested: &str, target: &str) -> bool {
         "text",
         "compound_text",
     ];
-    let req_is_alias = TEXT_ALIASES.iter().any(|&alias| req_base.eq_ignore_ascii_case(alias));
-    let tgt_is_alias = TEXT_ALIASES.iter().any(|&alias| tgt_base.eq_ignore_ascii_case(alias));
+    let req_is_alias = TEXT_ALIASES
+        .iter()
+        .any(|&alias| req_base.eq_ignore_ascii_case(alias));
+    let tgt_is_alias = TEXT_ALIASES
+        .iter()
+        .any(|&alias| tgt_base.eq_ignore_ascii_case(alias));
 
-    let req_is_text_compatible = req_is_text_cat || req_is_alias || crate::core::utils::is_html_mime(req_base);
-    let tgt_is_text_compatible = tgt_is_text_cat || tgt_is_alias || crate::core::utils::is_html_mime(tgt_base);
+    let req_is_text_compatible =
+        req_is_text_cat || req_is_alias || crate::core::utils::is_html_mime(req_base);
+    let tgt_is_text_compatible =
+        tgt_is_text_cat || tgt_is_alias || crate::core::utils::is_html_mime(tgt_base);
 
     (req_is_alias && tgt_is_text_compatible) || (tgt_is_alias && req_is_text_compatible)
 }
@@ -89,7 +99,9 @@ fn mime_is_compatible(requested: &str, target: &str) -> bool {
 pub(crate) fn is_sensitive<S: AsRef<str>>(mimes: &[S]) -> bool {
     SENSITIVE_MIME_HINTS.iter().any(|&hint| {
         let hint_lower = hint.to_ascii_lowercase();
-        mimes.iter().any(|m| m.as_ref().to_ascii_lowercase().contains(&hint_lower))
+        mimes
+            .iter()
+            .any(|m| m.as_ref().to_ascii_lowercase().contains(&hint_lower))
     })
 }
 
@@ -131,16 +143,32 @@ fn make_pipe() -> Option<(std::fs::File, OwnedFd)> {
 // --- ExtDataControlManagerV1 ---
 
 impl Dispatch<ExtDataControlManagerV1, ()> for WaylandState {
-    fn event(_: &mut Self, _: &ExtDataControlManagerV1, _: ext_data_control_manager_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &ExtDataControlManagerV1,
+        _: ext_data_control_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 // --- ExtDataControlOfferV1 ---
 
 impl Dispatch<ExtDataControlOfferV1, OfferData> for WaylandState {
-    fn event(_: &mut Self, _: &ExtDataControlOfferV1, ev: ext_data_control_offer_v1::Event, data: &OfferData, _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        _: &mut Self,
+        _: &ExtDataControlOfferV1,
+        ev: ext_data_control_offer_v1::Event,
+        data: &OfferData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let ext_data_control_offer_v1::Event::Offer { mime_type } = ev
             && let Ok(mut mimes) = data.mimes.lock()
-            && !mimes.contains(&mime_type) {
+            && !mimes.contains(&mime_type)
+        {
             mimes.push(mime_type);
         }
     }
@@ -161,7 +189,10 @@ mod tests {
         assert!(is_sensitive(&["x-gnome-cliptrace"]));
         assert!(is_sensitive(&["org.nspasteboard.ConcealedType"]));
         assert!(is_sensitive(&["custom/secret-payload"]));
-        assert!(is_sensitive(&["text/plain", "application/x-keepassxc-selection"]));
+        assert!(is_sensitive(&[
+            "text/plain",
+            "application/x-keepassxc-selection"
+        ]));
     }
 
     #[test]
@@ -189,7 +220,10 @@ mod tests {
 
     #[test]
     fn mime_is_compatible_exact_match_is_case_and_param_insensitive() {
-        assert!(mime_is_compatible("TEXT/Plain", "text/plain; charset=utf-8"));
+        assert!(mime_is_compatible(
+            "TEXT/Plain",
+            "text/plain; charset=utf-8"
+        ));
     }
 
     #[test]
@@ -236,8 +270,14 @@ mod tests {
 
     #[test]
     fn mime_is_compatible_html_and_xhtml_match_with_parameters_in_both_directions() {
-        assert!(mime_is_compatible("text/html; charset=utf-8", "application/xhtml+xml"));
-        assert!(mime_is_compatible("application/xhtml+xml", "TEXT/HTML; charset=utf-8"));
+        assert!(mime_is_compatible(
+            "text/html; charset=utf-8",
+            "application/xhtml+xml"
+        ));
+        assert!(mime_is_compatible(
+            "application/xhtml+xml",
+            "TEXT/HTML; charset=utf-8"
+        ));
     }
 
     #[test]
