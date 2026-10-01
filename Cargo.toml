@@ -44,4 +44,7 @@ panic = "abort"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+undocumented_unsafe_blocks = "warn"
+cast_lossless = "warn"
+redundant_clone = "warn"
 
