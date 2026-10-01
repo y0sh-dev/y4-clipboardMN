@@ -16,21 +16,31 @@ use crate::wayland::state::{WaylandState, OfferData};
 use crate::core::constants::*;
 
 /// Evaluates if the requested MIME type is compatible with the target type.
-/// Supports category-level matching for text and image groups. Both sides
-/// are compared via their normalized base type (case- and
-/// whitespace-insensitive, parameters stripped — see
-/// `core::utils::parse_mime`), so `TEXT/PLAIN`, `text/plain; charset=utf-8`
-/// and `text/plain;charset=UTF-8` are all treated identically.
+/// Supports category-level matching for the text group. Both sides are
+/// compared via their normalized base type (case- and whitespace-
+/// insensitive, parameters stripped — see `core::utils::mime_base`), so
+/// `TEXT/PLAIN`, `text/plain; charset=utf-8` and `text/plain;charset=UTF-8`
+/// are all treated identically. Zero allocations throughout.
+///
+/// Images are deliberately *not* given the same category-level treatment:
+/// PNG, JPEG, WebP, GIF, ... are distinct binary encodings, and without
+/// dynamic transcoding (removed — see `wayland::handlers::data_control::source`)
+/// y4p cannot turn one into another on request. Cross-matching them here
+/// would let a target's `Send` handler believe it can satisfy a request for
+/// a format it's never actually going to produce, silently sending the
+/// wrong bytes (or crashing a strict decoder) instead of this failing
+/// cleanly earlier. Images therefore only ever match via the exact-base-type
+/// check below.
 fn mime_is_compatible(requested: &str, target: &str) -> bool {
-    let req_base = crate::core::utils::parse_mime(requested).0;
-    let tgt_base = crate::core::utils::parse_mime(target).0;
+    let req_base = crate::core::utils::mime_base(requested);
+    let tgt_base = crate::core::utils::mime_base(target);
 
-    if req_base == tgt_base { return true; }
-    if req_base.starts_with("text/") && tgt_base.starts_with("text/") { return true; }
-    if req_base.starts_with("image/") && tgt_base.starts_with("image/") { return true; }
+    if req_base.eq_ignore_ascii_case(tgt_base) { return true; }
+    if crate::core::utils::starts_with_ignore_ascii_case(req_base, "text/")
+        && crate::core::utils::starts_with_ignore_ascii_case(tgt_base, "text/") {
+        return true;
+    }
 
-    // Already-lowercased base forms — the old list's charset-suffixed
-    // variants are redundant now that params are stripped before comparing.
     const TEXT_ALIASES: &[&str] = &[
         "text/plain",
         "utf8_string",
@@ -40,10 +50,10 @@ fn mime_is_compatible(requested: &str, target: &str) -> bool {
     ];
     // text/html already matches via the text/* rule above; application/xhtml+xml
     // is HTML in an XML wrapper and needs the same "requestable as plain text" treatment.
-    let req_is_text_alias = TEXT_ALIASES.contains(&req_base.as_str());
-    let tgt_is_text_alias = TEXT_ALIASES.contains(&tgt_base.as_str())
-        || tgt_base.starts_with("text/")
-        || tgt_base == "application/xhtml+xml";
+    let req_is_text_alias = TEXT_ALIASES.iter().any(|&alias| req_base.eq_ignore_ascii_case(alias));
+    let tgt_is_text_alias = TEXT_ALIASES.iter().any(|&alias| tgt_base.eq_ignore_ascii_case(alias))
+        || crate::core::utils::starts_with_ignore_ascii_case(tgt_base, "text/")
+        || tgt_base.eq_ignore_ascii_case("application/xhtml+xml");
 
     req_is_text_alias && tgt_is_text_alias
 }
@@ -147,5 +157,52 @@ mod tests {
     fn is_sensitive_empty_list_returns_false() {
         let empty: &[&str] = &[];
         assert!(!is_sensitive(empty));
+    }
+
+    // --- mime_is_compatible ---
+
+    #[test]
+    fn mime_is_compatible_exact_match() {
+        assert!(mime_is_compatible("text/plain", "text/plain"));
+        assert!(mime_is_compatible("image/png", "image/png"));
+    }
+
+    #[test]
+    fn mime_is_compatible_exact_match_is_case_and_param_insensitive() {
+        assert!(mime_is_compatible("TEXT/Plain", "text/plain; charset=utf-8"));
+    }
+
+    #[test]
+    fn mime_is_compatible_distinct_image_formats_never_cross_match() {
+        // The behaviour this whole refactor exists to enforce: without
+        // dynamic transcoding, a request for one image format must never
+        // be satisfied by a different one.
+        assert!(!mime_is_compatible("image/png", "image/jpeg"));
+        assert!(!mime_is_compatible("image/webp", "image/png"));
+        assert!(!mime_is_compatible("image/gif", "image/svg+xml"));
+    }
+
+    #[test]
+    fn mime_is_compatible_text_category_cross_matches() {
+        assert!(mime_is_compatible("text/plain", "text/html"));
+        assert!(mime_is_compatible("text/markdown", "text/plain"));
+    }
+
+    #[test]
+    fn mime_is_compatible_text_aliases_match_plain_text_family() {
+        assert!(mime_is_compatible("UTF8_STRING", "text/plain"));
+        assert!(mime_is_compatible("text/plain", "STRING"));
+        assert!(mime_is_compatible("TEXT", "compound_text"));
+    }
+
+    #[test]
+    fn mime_is_compatible_text_alias_matches_xhtml_target() {
+        assert!(mime_is_compatible("text/plain", "application/xhtml+xml"));
+    }
+
+    #[test]
+    fn mime_is_compatible_unrelated_non_text_types_do_not_match() {
+        assert!(!mime_is_compatible("application/json", "application/pdf"));
+        assert!(!mime_is_compatible("image/png", "text/plain"));
     }
 }
