@@ -16,21 +16,52 @@ use crate::wayland::state::{WaylandState, OfferData};
 use crate::core::constants::*;
 
 /// Evaluates if the requested MIME type is compatible with the target type.
-/// Supports category-level matching for text and image groups. Both sides
-/// are compared via their normalized base type (case- and
-/// whitespace-insensitive, parameters stripped — see
-/// `core::utils::parse_mime`), so `TEXT/PLAIN`, `text/plain; charset=utf-8`
-/// and `text/plain;charset=UTF-8` are all treated identically.
+/// Supports category-level matching for the text group. Both sides are
+/// compared via their normalized base type (case- and whitespace-
+/// insensitive, parameters stripped — see `core::utils::mime_base`), so
+/// `TEXT/PLAIN`, `text/plain; charset=utf-8` and `text/plain;charset=UTF-8`
+/// are all treated identically. Zero allocations throughout.
+///
+/// Every rule here is applied symmetrically — `mime_is_compatible(a, b)` and
+/// `mime_is_compatible(b, a)` always agree — since nothing about "requested"
+/// vs. "target" makes one side a more authoritative judge of compatibility
+/// than the other (see PR #40 review: the previous text-alias rule checked
+/// `requested` only against the fixed alias list while letting `target` also
+/// match via `text/*`/XHTML, so `text/plain` was compatible with
+/// `application/xhtml+xml` only in one direction, and `text/html` with
+/// `application/xhtml+xml` in neither).
+///
+/// Images are deliberately *not* given the same category-level treatment:
+/// PNG, JPEG, WebP, GIF, ... are distinct binary encodings, and without
+/// dynamic transcoding (removed — see `wayland::handlers::data_control::source`)
+/// y4p cannot turn one into another on request. Cross-matching them here
+/// would let a target's `Send` handler believe it can satisfy a request for
+/// a format it's never actually going to produce, silently sending the
+/// wrong bytes (or crashing a strict decoder) instead of this failing
+/// cleanly earlier. Images therefore only ever match via the exact-base-type
+/// check below.
 fn mime_is_compatible(requested: &str, target: &str) -> bool {
-    let req_base = crate::core::utils::parse_mime(requested).0;
-    let tgt_base = crate::core::utils::parse_mime(target).0;
+    let req_base = crate::core::utils::mime_base(requested);
+    let tgt_base = crate::core::utils::mime_base(target);
 
-    if req_base == tgt_base { return true; }
-    if req_base.starts_with("text/") && tgt_base.starts_with("text/") { return true; }
-    if req_base.starts_with("image/") && tgt_base.starts_with("image/") { return true; }
+    if req_base.eq_ignore_ascii_case(tgt_base) { return true; }
 
-    // Already-lowercased base forms — the old list's charset-suffixed
-    // variants are redundant now that params are stripped before comparing.
+    let req_is_text_cat = crate::core::utils::starts_with_ignore_ascii_case(req_base, "text/");
+    let tgt_is_text_cat = crate::core::utils::starts_with_ignore_ascii_case(tgt_base, "text/");
+    if req_is_text_cat && tgt_is_text_cat { return true; }
+
+    // Symmetric HTML/XHTML markup match: text/html and application/xhtml+xml
+    // are both HTML markup, just wrapped differently, so either side being
+    // either variant is enough — independent of which one is "requested".
+    if crate::core::utils::is_html_mime(req_base) && crate::core::utils::is_html_mime(tgt_base) {
+        return true;
+    }
+
+    // Symmetric plain-text alias negotiation: X11/Wayland legacy string
+    // atoms (TEXT_ALIASES) are requestable wherever any text-compatible MIME
+    // (text/*, HTML markup, or another alias) sits on the other side — and,
+    // crucially, that "other side" check is applied to whichever of the two
+    // is the alias, not fixed to `requested`.
     const TEXT_ALIASES: &[&str] = &[
         "text/plain",
         "utf8_string",
@@ -38,14 +69,13 @@ fn mime_is_compatible(requested: &str, target: &str) -> bool {
         "text",
         "compound_text",
     ];
-    // text/html already matches via the text/* rule above; application/xhtml+xml
-    // is HTML in an XML wrapper and needs the same "requestable as plain text" treatment.
-    let req_is_text_alias = TEXT_ALIASES.contains(&req_base.as_str());
-    let tgt_is_text_alias = TEXT_ALIASES.contains(&tgt_base.as_str())
-        || tgt_base.starts_with("text/")
-        || tgt_base == "application/xhtml+xml";
+    let req_is_alias = TEXT_ALIASES.iter().any(|&alias| req_base.eq_ignore_ascii_case(alias));
+    let tgt_is_alias = TEXT_ALIASES.iter().any(|&alias| tgt_base.eq_ignore_ascii_case(alias));
 
-    req_is_text_alias && tgt_is_text_alias
+    let req_is_text_compatible = req_is_text_cat || req_is_alias || crate::core::utils::is_html_mime(req_base);
+    let tgt_is_text_compatible = tgt_is_text_cat || tgt_is_alias || crate::core::utils::is_html_mime(tgt_base);
+
+    (req_is_alias && tgt_is_text_compatible) || (tgt_is_alias && req_is_text_compatible)
 }
 
 /// Checks if any offered MIME type matches the sensitive hints blacklist.
@@ -147,5 +177,90 @@ mod tests {
     fn is_sensitive_empty_list_returns_false() {
         let empty: &[&str] = &[];
         assert!(!is_sensitive(empty));
+    }
+
+    // --- mime_is_compatible ---
+
+    #[test]
+    fn mime_is_compatible_exact_match() {
+        assert!(mime_is_compatible("text/plain", "text/plain"));
+        assert!(mime_is_compatible("image/png", "image/png"));
+    }
+
+    #[test]
+    fn mime_is_compatible_exact_match_is_case_and_param_insensitive() {
+        assert!(mime_is_compatible("TEXT/Plain", "text/plain; charset=utf-8"));
+    }
+
+    #[test]
+    fn mime_is_compatible_distinct_image_formats_never_cross_match() {
+        // The behaviour this whole refactor exists to enforce: without
+        // dynamic transcoding, a request for one image format must never
+        // be satisfied by a different one.
+        assert!(!mime_is_compatible("image/png", "image/jpeg"));
+        assert!(!mime_is_compatible("image/webp", "image/png"));
+        assert!(!mime_is_compatible("image/gif", "image/svg+xml"));
+    }
+
+    #[test]
+    fn mime_is_compatible_text_category_cross_matches() {
+        assert!(mime_is_compatible("text/plain", "text/html"));
+        assert!(mime_is_compatible("text/markdown", "text/plain"));
+    }
+
+    #[test]
+    fn mime_is_compatible_text_aliases_match_plain_text_family() {
+        assert!(mime_is_compatible("UTF8_STRING", "text/plain"));
+        assert!(mime_is_compatible("text/plain", "STRING"));
+        assert!(mime_is_compatible("TEXT", "compound_text"));
+    }
+
+    #[test]
+    fn mime_is_compatible_text_alias_matches_xhtml_target() {
+        assert!(mime_is_compatible("text/plain", "application/xhtml+xml"));
+    }
+
+    #[test]
+    fn mime_is_compatible_unrelated_non_text_types_do_not_match() {
+        assert!(!mime_is_compatible("application/json", "application/pdf"));
+        assert!(!mime_is_compatible("image/png", "text/plain"));
+    }
+
+    // --- Bidirectional regression tests (PR #40 review) ---
+
+    #[test]
+    fn mime_is_compatible_html_and_xhtml_match_in_both_directions() {
+        assert!(mime_is_compatible("text/html", "application/xhtml+xml"));
+        assert!(mime_is_compatible("application/xhtml+xml", "text/html"));
+    }
+
+    #[test]
+    fn mime_is_compatible_html_and_xhtml_match_with_parameters_in_both_directions() {
+        assert!(mime_is_compatible("text/html; charset=utf-8", "application/xhtml+xml"));
+        assert!(mime_is_compatible("application/xhtml+xml", "TEXT/HTML; charset=utf-8"));
+    }
+
+    #[test]
+    fn mime_is_compatible_text_plain_alias_and_xhtml_match_in_both_directions() {
+        assert!(mime_is_compatible("text/plain", "application/xhtml+xml"));
+        assert!(mime_is_compatible("application/xhtml+xml", "text/plain"));
+    }
+
+    #[test]
+    fn mime_is_compatible_utf8_string_alias_and_xhtml_match_in_both_directions() {
+        assert!(mime_is_compatible("UTF8_STRING", "application/xhtml+xml"));
+        assert!(mime_is_compatible("application/xhtml+xml", "UTF8_STRING"));
+    }
+
+    #[test]
+    fn mime_is_compatible_alias_and_text_category_match_in_both_directions() {
+        assert!(mime_is_compatible("STRING", "text/markdown"));
+        assert!(mime_is_compatible("text/markdown", "STRING"));
+    }
+
+    #[test]
+    fn mime_is_compatible_two_aliases_match_each_other() {
+        assert!(mime_is_compatible("utf8_string", "compound_text"));
+        assert!(mime_is_compatible("compound_text", "utf8_string"));
     }
 }

@@ -114,8 +114,8 @@ pub(crate) fn select_mime(mimes: &[String], target_mime: Option<&str>, drop_rtf:
     MIME_PRIORITY_ORDER.iter()
         .find_map(|&p| mimes.iter().find(|m| crate::core::utils::mime_base_eq(m, p)))
         .cloned()
-        .or_else(|| mimes.iter().find(|m| m.to_ascii_lowercase().starts_with("image/")).cloned())
-        .or_else(|| mimes.iter().find(|m| m.to_ascii_lowercase().starts_with("text/") && (!drop_rtf || !crate::core::utils::is_rtf_mime(m))).cloned())
+        .or_else(|| mimes.iter().find(|m| crate::core::utils::starts_with_ignore_ascii_case(m, "image/")).cloned())
+        .or_else(|| mimes.iter().find(|m| crate::core::utils::starts_with_ignore_ascii_case(m, "text/") && (!drop_rtf || !crate::core::utils::is_rtf_mime(m))).cloned())
         .or_else(|| mimes.iter().find(|m| !drop_rtf || !crate::core::utils::is_rtf_mime(m)).cloned())
 }
 

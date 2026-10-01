@@ -71,28 +71,29 @@ pub fn strip_html_tags(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Splits a MIME/media-type string into its base type/subtype and any
-/// trailing `;`-separated parameters, trimming ASCII whitespace around each
-/// piece and lowercasing the base (ASCII-only) for case-insensitive
-/// comparison. RFC 2045 type/subtype names are case-insensitive, and real
-/// senders vary — `TEXT/PLAIN`, `text/plain; charset=utf-8` (space after
-/// `;`), `text/plain;charset=UTF-8` — none of which a bare `==`/
-/// `starts_with` check catches reliably. Parameter segments are trimmed but
-/// not case-folded: a param *value* like `charset=UTF-8` can meaningfully
-/// carry case, only the base type/subtype doesn't. Standard library only —
-/// `split`/`trim`/`to_ascii_lowercase`, no external crate.
-pub fn parse_mime(mime: &str) -> (String, Vec<&str>) {
-    let mut segments = mime.split(';');
-    let base = segments.next().unwrap_or("").trim().to_ascii_lowercase();
-    let params = segments.map(str::trim).filter(|p| !p.is_empty()).collect();
-    (base, params)
+/// Extracts a MIME/media-type string's base type/subtype — everything
+/// before the first `;`-separated parameter — trimming ASCII whitespace
+/// around it. Zero allocations: the result is a slice into `mime` itself,
+/// and case is left exactly as given (comparisons use `eq_ignore_ascii_case`
+/// rather than an upfront `to_ascii_lowercase` copy — see `mime_base_eq`).
+#[inline]
+pub fn mime_base(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or("").trim()
 }
 
 /// True if `a` and `b` name the same base MIME type once both are run
-/// through `parse_mime` — case- and whitespace-insensitive, and indifferent
-/// to any parameters trailing either side.
+/// through `mime_base` — case- and whitespace-insensitive, and indifferent
+/// to any parameters trailing either side. Zero allocations.
 pub fn mime_base_eq(a: &str, b: &str) -> bool {
-    parse_mime(a).0 == parse_mime(b).0
+    mime_base(a).eq_ignore_ascii_case(mime_base(b))
+}
+
+/// Case-insensitive, ASCII-only, allocation-free `s.starts_with(prefix)` —
+/// no `to_ascii_lowercase` copy of either side. `s.get(..prefix.len())`
+/// never panics on a string shorter than `prefix` or on a multi-byte char
+/// boundary (it returns `None` for either instead of slicing).
+pub fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 /// Identifies an image payload's real format from its leading bytes,
@@ -120,17 +121,17 @@ pub fn detect_image_mime(data: &[u8]) -> Option<&'static str> {
     (head.starts_with(b"<?xml") || head.starts_with(b"<svg")).then_some("image/svg+xml")
 }
 
-/// True when `mime`'s base type (see `parse_mime`) is HTML or XHTML markup
+/// True when `mime`'s base type (see `mime_base`) is HTML or XHTML markup
 /// (`text/html` or `application/xhtml+xml`) eligible for forced plain-text fallback.
 pub fn is_html_mime(mime: &str) -> bool {
-    let base = parse_mime(mime).0;
-    base == "text/html" || base == "application/xhtml+xml"
+    let base = mime_base(mime);
+    base.eq_ignore_ascii_case("text/html") || base.eq_ignore_ascii_case("application/xhtml+xml")
 }
 
-/// True when `mime`'s base type (see `parse_mime`) is RTF (`text/rtf` or `application/rtf`).
+/// True when `mime`'s base type (see `mime_base`) is RTF (`text/rtf` or `application/rtf`).
 pub fn is_rtf_mime(mime: &str) -> bool {
-    let base = parse_mime(mime).0;
-    base == "text/rtf" || base == "application/rtf"
+    let base = mime_base(mime);
+    base.eq_ignore_ascii_case("text/rtf") || base.eq_ignore_ascii_case("application/rtf")
 }
 
 #[cfg(test)]
@@ -252,10 +253,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_mime_splits_base_and_params() {
-        let (base, params) = parse_mime("Text/Plain ; charset=UTF-8 ; foo=bar");
-        assert_eq!(base, "text/plain");
-        assert_eq!(params, vec!["charset=UTF-8", "foo=bar"]);
+    fn mime_base_strips_trailing_parameters() {
+        assert_eq!(mime_base("Text/Plain ; charset=UTF-8 ; foo=bar"), "Text/Plain");
+    }
+
+    #[test]
+    fn mime_base_trims_surrounding_whitespace() {
+        assert_eq!(mime_base("  text/plain  ;charset=utf-8"), "text/plain");
+    }
+
+    #[test]
+    fn mime_base_no_parameters_returns_whole_string_trimmed() {
+        assert_eq!(mime_base("text/html"), "text/html");
+    }
+
+    #[test]
+    fn mime_base_preserves_case() {
+        // Case-folding is the caller's job (via `eq_ignore_ascii_case`),
+        // not `mime_base`'s — it only isolates the base, verbatim.
+        assert_eq!(mime_base("TEXT/PLAIN"), "TEXT/PLAIN");
+    }
+
+    #[test]
+    fn starts_with_ignore_ascii_case_matches_same_case() {
+        assert!(starts_with_ignore_ascii_case("image/png", "image/"));
+    }
+
+    #[test]
+    fn starts_with_ignore_ascii_case_matches_different_case() {
+        assert!(starts_with_ignore_ascii_case("IMAGE/PNG", "image/"));
+        assert!(starts_with_ignore_ascii_case("Text/Html", "TEXT/"));
+    }
+
+    #[test]
+    fn starts_with_ignore_ascii_case_rejects_non_prefix() {
+        assert!(!starts_with_ignore_ascii_case("text/plain", "image/"));
+    }
+
+    #[test]
+    fn starts_with_ignore_ascii_case_shorter_than_prefix_never_panics() {
+        assert!(!starts_with_ignore_ascii_case("im", "image/"));
+        assert!(!starts_with_ignore_ascii_case("", "image/"));
     }
 
     #[test]

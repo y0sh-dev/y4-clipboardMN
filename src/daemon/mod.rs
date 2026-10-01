@@ -11,6 +11,7 @@ use crate::storage::{ClipboardDb, ContentLocation};
 use crate::wayland;
 use crate::wayland::state::{WaylandState, SourceMetadata, SourcePayload};
 use crate::core::constants::*;
+use crate::core::utils::is_html_mime;
 use crate::core::SocketGuard;
 use ipc::Command;
 use metrics::DaemonMetrics;
@@ -220,20 +221,7 @@ fn handle_restore_request(
         // stored one so the paste target can pick whichever it understands.
         source.offer(mime.clone());
 
-        if mime.starts_with("image/") {
-            // Bitmap-stream-only policy: images are Offered as pure bitmap
-            // data, never as a file path. A true-MIME-only Offer made every
-            // Wayland image paste fail (GTK/Qt/Chromium all hardcode
-            // image/png as the one bitmap format they'll even ask for), so
-            // image/png stays as a compatibility fallback alongside the
-            // truth — see source.rs's Send handler for how a png request
-            // gets satisfied (converted on demand if the image isn't
-            // already PNG, falling back to the raw bytes if no converter is
-            // installed).
-            if mime != "image/png" {
-                source.offer("image/png".to_string());
-            }
-        } else if mime == "text/html" || mime == "application/xhtml+xml" {
+        if is_html_mime(&mime) {
             for alt in HTML_MIME_ALTS {
                 if *alt != mime { source.offer(alt.to_string()); }
             }
