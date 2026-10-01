@@ -15,6 +15,11 @@ pub const MAX_HISTORY: usize = DEFAULT_MAX_HISTORY;
 pub const ENV_MAX_HISTORY: &str = "Y4P_MAX_HISTORY";
 pub const SQLITE_TIMEOUT_MS: u64 = 5000;
 
+/// Maximum payload size accepted from a Wayland pipe (256 MiB).
+/// Ingress streams exceeding this bound are discarded to prevent OOM exhaustion
+/// and corrupted/truncated records.
+pub const MAX_PAYLOAD_SIZE: usize = 256 * 1024 * 1024; // 268_435_456 bytes
+
 // --- IPC Protocol ---
 pub const IPC_CMD_RESTORE: u8 = 0x01;
 pub const IPC_CMD_EXIT: u8 = 0x02;

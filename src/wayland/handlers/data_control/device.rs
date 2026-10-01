@@ -82,11 +82,13 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
                     ingest_and_send(read_file, mime_to_get, &job_tx_clone);
                 });
             } else {
-                // Action Mode: Synchronous read for immediate CLI processing
-                let mut buf = Vec::new();
-                let mut reader = read_file.take(268435456);
-                let _ = reader.read_to_end(&mut buf);
-                state.rx_buf = buf;
+                // Action Mode: Synchronous read for immediate CLI processing.
+                // Guarded against truncation and unified with daemon normalisation.
+                if let Ok(Some(buf)) = read_bounded_payload(read_file, MAX_PAYLOAD_SIZE)
+                    && let Some((_, normalised)) = normalise_payload(mime_to_get, buf)
+                {
+                    state.rx_buf = normalised;
+                }
             }
         }
     }
@@ -187,6 +189,25 @@ fn normalise_payload(mime_to_get: String, mut payload: Vec<u8>) -> Option<(Strin
     Some((final_mime, payload))
 }
 
+/// Reads up to `max_size` bytes from `reader`. Returns `Ok(None)` if the
+/// input is empty or strictly exceeds `max_size` (preventing truncated,
+/// corrupted records from being accepted), and `Ok(Some(payload))` on a clean
+/// complete transfer.
+pub(crate) fn read_bounded_payload<R: Read>(
+    mut reader: R,
+    max_size: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut payload = Vec::new();
+    let mut bounded_reader = (&mut reader).take((max_size + 1) as u64);
+    bounded_reader.read_to_end(&mut payload)?;
+
+    if payload.is_empty() || payload.len() > max_size {
+        Ok(None)
+    } else {
+        Ok(Some(payload))
+    }
+}
+
 /// Reads a MIME payload from an already-`offer.receive()`d pipe, normalises
 /// it, hashes it, and forwards the finished `ClipboardJob` to the DbWorker.
 ///
@@ -197,12 +218,11 @@ fn ingest_and_send(
     mime_to_get: String,
     job_tx: &mpsc::Sender<ClipboardJob>,
 ) {
-    let mut payload = Vec::new();
-    let mut reader = read_file.take(268435456);
-
-    if reader.read_to_end(&mut payload).is_err() || payload.is_empty() {
-        return;
-    }
+    let payload = match read_bounded_payload(read_file, MAX_PAYLOAD_SIZE) {
+        Ok(Some(p)) => p,
+        Ok(None) => return,
+        Err(_) => return,
+    };
 
     let Some((final_mime, payload)) = normalise_payload(mime_to_get, payload) else {
         return;
@@ -384,5 +404,37 @@ mod tests {
             result,
             Some(("text/html".to_string(), b"<p>hi</p>".to_vec()))
         );
+    }
+
+    // --- read_bounded_payload ---
+
+    #[test]
+    fn read_bounded_payload_under_limit_succeeds() {
+        let input = b"short text payload";
+        let result = read_bounded_payload(&input[..], 1024).unwrap();
+        assert_eq!(result, Some(input.to_vec()));
+    }
+
+    #[test]
+    fn read_bounded_payload_exact_limit_succeeds() {
+        let input = [0x42; 64];
+        let result = read_bounded_payload(&input[..], 64).unwrap();
+        assert_eq!(result, Some(input.to_vec()));
+    }
+
+    #[test]
+    fn read_bounded_payload_exceeding_limit_returns_none() {
+        // 65 bytes against a 64-byte bound: strictly exceeds, must return None
+        // to guard against saving a truncated partial payload.
+        let input = [0x42; 65];
+        let result = read_bounded_payload(&input[..], 64).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn read_bounded_payload_empty_input_returns_none() {
+        let input: &[u8] = b"";
+        let result = read_bounded_payload(input, 1024).unwrap();
+        assert_eq!(result, None);
     }
 }
