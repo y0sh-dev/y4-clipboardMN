@@ -25,7 +25,7 @@ When a Wayland application sets a new clipboard selection, the compositor emits 
              |
              v
  [Stage 3: Payload Acquisition]
-             \-- Standard Pipe Transfer: 64 KiB page-aligned streaming
+             \-- Bounded direct read: read_to_end, capped at 256 MiB
              |
              v
  [Stage 4: Normalisation]
