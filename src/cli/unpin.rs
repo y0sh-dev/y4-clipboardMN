@@ -3,8 +3,8 @@
 
 // src/cli/unpin.rs
 
-use crate::storage::ClipboardDb;
 use super::pin;
+use crate::storage::ClipboardDb;
 
 /// Clear a history record's pinned flag, returning it to normal automatic
 /// rotation eviction. Argument parsing and target resolution are identical

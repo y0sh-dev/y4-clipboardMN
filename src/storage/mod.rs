@@ -8,10 +8,10 @@ mod db;
 mod schema;
 
 use rusqlite::{Connection, OpenFlags, Result};
+use sha3::{Digest, Sha3_256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use sha3::{Digest, Sha3_256};
 
 use cache::FileCache;
 use db::SqliteStore;
@@ -69,8 +69,8 @@ impl ClipboardDb {
         let db_path = crate::core::get_db_path();
         let cache_dir = crate::core::get_cache_dir();
 
-        let mut conn = Connection::open(&db_path)
-            .map_err(|e| format!("sqlite connection failed: {}", e))?;
+        let mut conn =
+            Connection::open(&db_path).map_err(|e| format!("sqlite connection failed: {}", e))?;
 
         // Secure file permissions
         if let Ok(metadata) = fs::metadata(&db_path) {
@@ -83,7 +83,10 @@ impl ClipboardDb {
 
         SchemaManager::initialize(&mut conn, SQLITE_TIMEOUT_MS)?;
 
-        Ok(Self { store: SqliteStore::new(conn), cache: FileCache::new(cache_dir) })
+        Ok(Self {
+            store: SqliteStore::new(conn),
+            cache: FileCache::new(cache_dir),
+        })
     }
 
     /// Read-only counterpart to `open`, for callers that never write (the
@@ -105,9 +108,13 @@ impl ClipboardDb {
         let conn = Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ).map_err(|e| format!("sqlite read-only connection failed: {}", e))?;
+        )
+        .map_err(|e| format!("sqlite read-only connection failed: {}", e))?;
 
-        Ok(Self { store: SqliteStore::new(conn), cache: FileCache::new(cache_dir) })
+        Ok(Self {
+            store: SqliteStore::new(conn),
+            cache: FileCache::new(cache_dir),
+        })
     }
 
     /// Public wrapper for raw data insertion. Returns the persistent row ID
@@ -116,7 +123,11 @@ impl ClipboardDb {
     pub fn insert_raw(&mut self, mime: &str, data: &[u8]) -> Result<i64, String> {
         let mut hasher = Sha3_256::new();
         hasher.update(data);
-        let hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        let hash = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
         self.insert_with_hash(mime, data, &hash, crate::core::get_max_history())
     }
 
@@ -136,9 +147,17 @@ impl ClipboardDb {
     /// Skipped inserts (empty payload, sensitive MIME) return `Ok(-1)` as an
     /// explicit "nothing to reference" sentinel — there is no record for a
     /// caller to act on in that case.
-    pub fn insert_with_hash(&mut self, mime: &str, data: &[u8], hash: &str, max_history: usize) -> Result<i64, String> {
+    pub fn insert_with_hash(
+        &mut self,
+        mime: &str,
+        data: &[u8],
+        hash: &str,
+        max_history: usize,
+    ) -> Result<i64, String> {
         let outcome = self.store.upsert_record(mime, data, hash, max_history)?;
-        if outcome.real_id == -1 { return Ok(-1); }
+        if outcome.real_id == -1 {
+            return Ok(-1);
+        }
 
         if outcome.is_image {
             let _ = self.cache.store(hash, data);
@@ -165,7 +184,9 @@ impl ClipboardDb {
     /// it) so a search result's displayed index is always consistent with
     /// `list`'s.
     pub fn search_metadata(&self, queries: &[String], limit: usize) -> Vec<(usize, MetaRow)> {
-        if queries.is_empty() { return Vec::new(); }
+        if queries.is_empty() {
+            return Vec::new();
+        }
         self.store.search_metadata(queries, limit)
     }
 

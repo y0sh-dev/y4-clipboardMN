@@ -14,12 +14,24 @@ pub fn run(args: &[String]) {
     let ctx = ArgContext::parse(args);
 
     // Strict validation: 'status' takes no flags and no positional arguments.
-    if !ctx.unknown_flags.is_empty() || ctx.raw || ctx.full || ctx.force || ctx.verbose || ctx.use_id {
-        eprintln!("{}command 'status' does not support specified options.", LOG_ERROR);
+    if !ctx.unknown_flags.is_empty()
+        || ctx.raw
+        || ctx.full
+        || ctx.force
+        || ctx.verbose
+        || ctx.use_id
+    {
+        eprintln!(
+            "{}command 'status' does not support specified options.",
+            LOG_ERROR
+        );
         return;
     }
     if !ctx.positionals.is_empty() {
-        eprintln!("{}command 'status' does not accept positional arguments.", LOG_ERROR);
+        eprintln!(
+            "{}command 'status' does not accept positional arguments.",
+            LOG_ERROR
+        );
         return;
     }
 

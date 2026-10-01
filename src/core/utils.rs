@@ -9,13 +9,19 @@ use percent_encoding::percent_decode;
 /// (e.g. `file://localhost/path`) by skipping to its own next `/` instead
 /// of leaking the host into the path like a naive prefix strip would.
 fn strip_file_scheme(line: &[u8]) -> &[u8] {
-    let Some(rest) = line.strip_prefix(b"file:") else { return line; };
+    let Some(rest) = line.strip_prefix(b"file:") else {
+        return line;
+    };
 
     match rest.strip_prefix(b"//") {
         // Empty authority ("file:///path") — already rooted.
         Some(after) if after.starts_with(b"/") => after,
         // Non-empty authority ("file://host/path") — skip past it to its own '/'.
-        Some(after) => after.iter().position(|&b| b == b'/').map(|i| &after[i..]).unwrap_or(b""),
+        Some(after) => after
+            .iter()
+            .position(|&b| b == b'/')
+            .map(|i| &after[i..])
+            .unwrap_or(b""),
         // No "//" at all ("file:/path" or "file:path") — path's own leading
         // '/', if any, is preserved since only "file:" itself was consumed.
         None => rest,
@@ -36,12 +42,18 @@ pub fn normalize_uri_list(data: &[u8]) -> Vec<u8> {
 
     for raw_line in data.split(|&b| b == b'\n') {
         let line = raw_line.trim_ascii();
-        if line.is_empty() || line[0] == b'#' { continue; }
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
 
         let decoded: Vec<u8> = percent_decode(strip_file_scheme(line)).collect();
-        if decoded.is_empty() { continue; }
+        if decoded.is_empty() {
+            continue;
+        }
 
-        if wrote_any { out.push(b'\n'); }
+        if wrote_any {
+            out.push(b'\n');
+        }
         out.extend_from_slice(&decoded);
         wrote_any = true;
     }
@@ -93,7 +105,8 @@ pub fn mime_base_eq(a: &str, b: &str) -> bool {
 /// never panics on a string shorter than `prefix` or on a multi-byte char
 /// boundary (it returns `None` for either instead of slicing).
 pub fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
-    s.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    s.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 /// Identifies an image payload's real format from its leading bytes,
@@ -141,7 +154,10 @@ mod tests {
 
     #[test]
     fn strip_html_tags_basic() {
-        assert_eq!(strip_html_tags(b"<b>Hello</b> <i>World</i>"), b"Hello World");
+        assert_eq!(
+            strip_html_tags(b"<b>Hello</b> <i>World</i>"),
+            b"Hello World"
+        );
     }
 
     #[test]
@@ -221,7 +237,10 @@ mod tests {
     #[test]
     fn normalize_uri_list_percent_decoding() {
         let input = b"file:///home/user/My%20Documents/test%231.txt";
-        assert_eq!(normalize_uri_list(input), "/home/user/My Documents/test#1.txt".as_bytes());
+        assert_eq!(
+            normalize_uri_list(input),
+            "/home/user/My Documents/test#1.txt".as_bytes()
+        );
     }
 
     #[test]
@@ -248,13 +267,19 @@ mod tests {
     fn mime_base_eq_ignores_case_and_param_whitespace() {
         assert!(mime_base_eq("TEXT/PLAIN", "text/plain"));
         assert!(mime_base_eq("text/plain; charset=utf-8", "text/plain"));
-        assert!(mime_base_eq("text/plain;charset=UTF-8", "text/plain;charset=utf-8"));
+        assert!(mime_base_eq(
+            "text/plain;charset=UTF-8",
+            "text/plain;charset=utf-8"
+        ));
         assert!(!mime_base_eq("text/html", "text/plain"));
     }
 
     #[test]
     fn mime_base_strips_trailing_parameters() {
-        assert_eq!(mime_base("Text/Plain ; charset=UTF-8 ; foo=bar"), "Text/Plain");
+        assert_eq!(
+            mime_base("Text/Plain ; charset=UTF-8 ; foo=bar"),
+            "Text/Plain"
+        );
     }
 
     #[test]
@@ -298,12 +323,18 @@ mod tests {
 
     #[test]
     fn detect_image_mime_png() {
-        assert_eq!(detect_image_mime(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]), Some("image/png"));
+        assert_eq!(
+            detect_image_mime(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]),
+            Some("image/png")
+        );
     }
 
     #[test]
     fn detect_image_mime_jpeg() {
-        assert_eq!(detect_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(
+            detect_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
     }
 
     #[test]
@@ -337,12 +368,18 @@ mod tests {
 
     #[test]
     fn detect_image_mime_svg_xml_declaration() {
-        assert_eq!(detect_image_mime(b"<?xml version=\"1.0\"?><svg></svg>"), Some("image/svg+xml"));
+        assert_eq!(
+            detect_image_mime(b"<?xml version=\"1.0\"?><svg></svg>"),
+            Some("image/svg+xml")
+        );
     }
 
     #[test]
     fn detect_image_mime_svg_bare() {
-        assert_eq!(detect_image_mime(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"), Some("image/svg+xml"));
+        assert_eq!(
+            detect_image_mime(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
+            Some("image/svg+xml")
+        );
     }
 
     #[test]

@@ -3,13 +3,13 @@
 
 // src/storage/db.rs
 
-use rusqlite::{params, Connection, Result};
+use super::MetaRow;
+use crate::core::constants::{PREVIEW_CHARS, SENSITIVE_MIME_HINTS};
+use crate::core::utils::strip_html_tags;
 use rusqlite::types::ValueRef;
+use rusqlite::{Connection, Result, params};
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::core::constants::{SENSITIVE_MIME_HINTS, PREVIEW_CHARS};
-use crate::core::utils::strip_html_tags;
-use super::MetaRow;
 
 /// Result of `upsert_record`: `real_id == -1` means the payload was
 /// deliberately skipped (empty / sensitive MIME) and no rotation ran.
@@ -33,9 +33,19 @@ impl SqliteStore {
     /// Insert-or-touch a record by hash, then atomically rotate out anything
     /// beyond `max_history`. See `ClipboardDb::insert_with_hash` doc for why
     /// the ID is returned directly instead of via a follow-up query.
-    pub fn upsert_record(&mut self, mime: &str, data: &[u8], hash: &str, max_history: usize) -> Result<UpsertOutcome, String> {
+    pub fn upsert_record(
+        &mut self,
+        mime: &str,
+        data: &[u8],
+        hash: &str,
+        max_history: usize,
+    ) -> Result<UpsertOutcome, String> {
         if data.is_empty() || SENSITIVE_MIME_HINTS.iter().any(|&hint| mime.contains(hint)) {
-            return Ok(UpsertOutcome { real_id: -1, is_image: false, expired_hashes: Vec::new() });
+            return Ok(UpsertOutcome {
+                real_id: -1,
+                is_image: false,
+                expired_hashes: Vec::new(),
+            });
         }
 
         let is_image = mime.starts_with("image/") || mime.contains("gif");
@@ -44,17 +54,26 @@ impl SqliteStore {
         // never happen on a real system, but `panic = "abort"` in the release
         // profile would still turn that near-impossible case into a full
         // process abort instead of degrading gracefully.
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
 
-        let existing: Option<i64> = tx.query_row(
-            "SELECT id FROM clipboard WHERE hash = ?1 LIMIT 1",
-            params![hash], |row| row.get(0)
-        ).ok();
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM clipboard WHERE hash = ?1 LIMIT 1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .ok();
 
         let real_id = if let Some(id) = existing {
-            tx.execute("UPDATE clipboard SET timestamp = ?1 WHERE id = ?2", params![ts, id])
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE clipboard SET timestamp = ?1 WHERE id = ?2",
+                params![ts, id],
+            )
+            .map_err(|e| e.to_string())?;
             id
         } else {
             // "application/xhtml+xml" doesn't contain "text" itself (unlike
@@ -64,7 +83,10 @@ impl SqliteStore {
             // (see search_metadata/validate_keywords) always lines up with
             // what actually got stored as TEXT vs BLOB.
             let is_markup = mime == "text/html" || mime.contains("xhtml");
-            let is_text_like = mime.contains("text") || mime.contains("uri-list") || mime.contains("json") || is_markup;
+            let is_text_like = mime.contains("text")
+                || mime.contains("uri-list")
+                || mime.contains("json")
+                || is_markup;
 
             let preview = if is_text_like {
                 // Rich markup's raw tags aren't a readable preview — strip
@@ -76,8 +98,15 @@ impl SqliteStore {
                     Cow::Borrowed(data)
                 };
                 let s = String::from_utf8_lossy(&text_data);
-                Some(s.chars().take(PREVIEW_CHARS).collect::<String>().replace('\n', " "))
-            } else { None };
+                Some(
+                    s.chars()
+                        .take(PREVIEW_CHARS)
+                        .collect::<String>()
+                        .replace('\n', " "),
+                )
+            } else {
+                None
+            };
 
             // TEXT storage class for textual content: lets `content LIKE ?`
             // match directly, without a per-row `CAST(content AS TEXT)` at
@@ -112,13 +141,16 @@ impl SqliteStore {
         // set and probe it against every unpinned row (cost scales with
         // total history size, not with how much actually expired).
         let expired_hashes: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT hash FROM clipboard
+            let mut stmt = tx
+                .prepare(
+                    "SELECT hash FROM clipboard
                  WHERE is_pinned = 0
                  ORDER BY timestamp DESC
-                 LIMIT -1 OFFSET ?1"
-            ).map_err(|e| e.to_string())?;
-            let rows = stmt.query_map(params![max_history as i64], |row| row.get::<_, String>(0))
+                 LIMIT -1 OFFSET ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![max_history as i64], |row| row.get::<_, String>(0))
                 .map_err(|e| e.to_string())?;
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -133,12 +165,17 @@ impl SqliteStore {
                  ORDER BY timestamp DESC
                  LIMIT -1 OFFSET ?1
              )",
-            params![max_history as i64]
-        ).map_err(|e| e.to_string())?;
+            params![max_history as i64],
+        )
+        .map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())?;
 
-        Ok(UpsertOutcome { real_id, is_image, expired_hashes })
+        Ok(UpsertOutcome {
+            real_id,
+            is_image,
+            expired_hashes,
+        })
     }
 
     /// See `ClipboardDb::search_metadata` doc: each hit carries its absolute
@@ -192,12 +229,25 @@ impl SqliteStore {
 
         let wildcarded: Vec<String> = queries.iter().map(|q| format!("%{}%", q)).collect();
         let limit_param = limit as i64;
-        let mut bindings: Vec<&dyn rusqlite::ToSql> = wildcarded.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let mut bindings: Vec<&dyn rusqlite::ToSql> = wildcarded
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
         bindings.push(&limit_param);
 
         let rows = match stmt.query_map(bindings.as_slice(), |row| {
             let abs_idx: i64 = row.get(0)?;
-            Ok((abs_idx as usize, (row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)))
+            Ok((
+                abs_idx as usize,
+                (
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ),
+            ))
         }) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
@@ -216,15 +266,23 @@ impl SqliteStore {
 
         for kw in keywords {
             let pattern = format!("%{}%", kw);
-            let exists = self.conn.query_row(
-                "SELECT 1 FROM clipboard
+            let exists = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM clipboard
                  WHERE (mime LIKE '%text%' OR mime LIKE '%UTF8%')
                    AND (preview LIKE ?1 OR content LIKE ?1)
                  LIMIT 1",
-                params![pattern], |_| Ok(())
-            ).is_ok();
+                    params![pattern],
+                    |_| Ok(()),
+                )
+                .is_ok();
 
-            if exists { valid.push(kw.clone()); } else { invalid.push(kw.clone()); }
+            if exists {
+                valid.push(kw.clone());
+            } else {
+                invalid.push(kw.clone());
+            }
         }
 
         (valid, invalid)
@@ -238,7 +296,14 @@ impl SqliteStore {
             Err(_) => return Vec::new(),
         };
         let rows = match stmt.query_map(params![limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
         }) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
@@ -249,37 +314,47 @@ impl SqliteStore {
     /// Row's inline content (if any) plus its hash, for the facade to fall
     /// back to the file cache when `content` is `NULL`.
     pub fn get_row_content(&self, id: i64) -> Option<(String, Option<Vec<u8>>, String)> {
-        self.conn.query_row(
-            "SELECT mime, content, hash FROM clipboard WHERE id = ?1",
-            params![id],
-            |row| {
-                // BUGFIX: `content` can now be TEXT storage class (v3
-                // textual rows) or BLOB (binary/legacy rows) — `row.get::<_,
-                // Vec<u8>>` only accepts BLOB and errors on TEXT. Reading
-                // via `ValueRef::as_bytes` accepts either storage class
-                // uniformly as raw bytes.
-                let content = match row.get_ref(1)? {
-                    ValueRef::Null => None,
-                    v => Some(v.as_bytes()?.to_vec()),
-                };
-                Ok((row.get(0)?, content, row.get(2)?))
-            }
-        ).ok()
+        self.conn
+            .query_row(
+                "SELECT mime, content, hash FROM clipboard WHERE id = ?1",
+                params![id],
+                |row| {
+                    // BUGFIX: `content` can now be TEXT storage class (v3
+                    // textual rows) or BLOB (binary/legacy rows) — `row.get::<_,
+                    // Vec<u8>>` only accepts BLOB and errors on TEXT. Reading
+                    // via `ValueRef::as_bytes` accepts either storage class
+                    // uniformly as raw bytes.
+                    let content = match row.get_ref(1)? {
+                        ValueRef::Null => None,
+                        v => Some(v.as_bytes()?.to_vec()),
+                    };
+                    Ok((row.get(0)?, content, row.get(2)?))
+                },
+            )
+            .ok()
     }
 
     /// Same shape as `get_row_content` but without materializing the BLOB —
     /// backs `ClipboardDb::locate_content`.
     pub fn get_row_location(&self, id: i64) -> Option<(String, bool, String)> {
-        self.conn.query_row(
-            "SELECT mime, content IS NOT NULL, hash FROM clipboard WHERE id = ?1",
-            params![id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        ).ok()
+        self.conn
+            .query_row(
+                "SELECT mime, content IS NOT NULL, hash FROM clipboard WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()
     }
 
     pub fn update_timestamp(&mut self, id: i64) -> Result<()> {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-        self.conn.execute("UPDATE clipboard SET timestamp = ?1 WHERE id = ?2", params![ts, id])?;
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.conn.execute(
+            "UPDATE clipboard SET timestamp = ?1 WHERE id = ?2",
+            params![ts, id],
+        )?;
         Ok(())
     }
 
@@ -287,12 +362,18 @@ impl SqliteStore {
     /// the facade can clean up the matching cache file regardless of which
     /// bit fired — mirrors the pre-split behavior exactly.
     pub fn delete_by_id(&mut self, id: i64) -> Result<(bool, Option<String>)> {
-        let hash: Option<String> = self.conn.query_row(
-            "SELECT hash FROM clipboard WHERE id = ?1",
-            params![id], |row| row.get(0)
-        ).ok();
+        let hash: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT hash FROM clipboard WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok();
 
-        let res = self.conn.execute("DELETE FROM clipboard WHERE id = ?1", params![id])?;
+        let res = self
+            .conn
+            .execute("DELETE FROM clipboard WHERE id = ?1", params![id])?;
         Ok((res > 0, hash))
     }
 
@@ -313,18 +394,21 @@ impl SqliteStore {
     /// whether a row was actually affected, so the CLI can distinguish
     /// "not found" from success rather than reporting a false positive.
     pub fn set_pinned(&mut self, id: i64, is_pinned: bool) -> Result<bool, String> {
-        let affected = self.conn.execute(
-            "UPDATE clipboard SET is_pinned = ?1 WHERE id = ?2",
-            params![is_pinned, id],
-        ).map_err(|e| e.to_string())?;
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE clipboard SET is_pinned = ?1 WHERE id = ?2",
+                params![is_pinned, id],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(affected > 0)
     }
 
     pub fn get_total_count(&self) -> usize {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM clipboard",
-            [],
-            |row| row.get::<_, i64>(0).map(|val| val as usize)
-        ).unwrap_or(0)
+        self.conn
+            .query_row("SELECT COUNT(*) FROM clipboard", [], |row| {
+                row.get::<_, i64>(0).map(|val| val as usize)
+            })
+            .unwrap_or(0)
     }
 }

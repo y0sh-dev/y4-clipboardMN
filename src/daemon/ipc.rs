@@ -18,7 +18,9 @@ pub enum Command {
 
 impl Command {
     fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() <= 1 { return None; }
+        if buf.len() <= 1 {
+            return None;
+        }
         let n = buf.len() - 1; // trailing IPC_DELIMITER
         match buf[0] {
             IPC_CMD_EXIT => Some(Command::Exit),
@@ -38,7 +40,10 @@ impl Command {
 /// Accept one pending connection, if any, and decode its command. `Status`
 /// is the only bidirectional case: it writes `status()`'s result back
 /// before returning. Everything else is fire-and-forget, as before.
-pub fn accept_and_dispatch(listener: &UnixListener, status: impl FnOnce() -> String) -> Option<Command> {
+pub fn accept_and_dispatch(
+    listener: &UnixListener,
+    status: impl FnOnce() -> String,
+) -> Option<Command> {
     let (stream, _) = listener.accept().ok()?;
     let mut reader = std::io::BufReader::new(stream);
     let mut buf = Vec::new();

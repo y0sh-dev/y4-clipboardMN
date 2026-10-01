@@ -3,9 +3,9 @@
 
 // src/cli/store.rs
 
-use crate::storage::ClipboardDb;
-use crate::core::constants::*;
 use crate::cli::utils::ArgContext;
+use crate::core::constants::*;
+use crate::storage::ClipboardDb;
 use std::io::{self, Read, Write};
 
 /// Ingest data from stdin, persist to database, and synchronize to system clipboard.
@@ -14,18 +14,28 @@ pub fn run(args: &[String], db: &mut ClipboardDb) {
 
     // Strict validation: 'store' only permits --verbose/-v
     if !ctx.unknown_flags.is_empty() || ctx.raw || ctx.full || ctx.force {
-        eprintln!("{}command 'store' does not support specified options.", LOG_ERROR);
+        eprintln!(
+            "{}command 'store' does not support specified options.",
+            LOG_ERROR
+        );
         return;
     }
 
     // Arity enforcement: ensure no more than one positional (MIME) is provided
     if ctx.positionals.len() > 1 {
-        eprintln!("{}command 'store' accepts at most one MIME type argument.", LOG_ERROR);
+        eprintln!(
+            "{}command 'store' accepts at most one MIME type argument.",
+            LOG_ERROR
+        );
         return;
     }
 
     // Resolve target MIME from positional arguments or use system default
-    let mime = ctx.positionals.first().map(|s| s.as_str()).unwrap_or(DEFAULT_MIME);
+    let mime = ctx
+        .positionals
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or(DEFAULT_MIME);
 
     // Read payload from standard input stream until EOF
     let mut buffer = Vec::new();
@@ -77,7 +87,10 @@ pub fn run(args: &[String], db: &mut ClipboardDb) {
             // sensitive MIME hint). Nothing was persisted, so there is
             // nothing to synchronize back to the daemon.
             if ctx.verbose {
-                println!("{}payload skipped by storage policy; not synchronized.", LOG_INFO);
+                println!(
+                    "{}payload skipped by storage policy; not synchronized.",
+                    LOG_INFO
+                );
             }
         }
         Err(e) => {

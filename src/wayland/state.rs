@@ -3,14 +3,14 @@
 
 // src/wayland/state.rs
 
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, mpsc};
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::ExtDataControlDeviceV1,
     ext_data_control_manager_v1::ExtDataControlManagerV1,
     ext_data_control_source_v1::ExtDataControlSourceV1,
 };
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
 
 pub struct OfferData {
     pub mimes: Arc<Mutex<Vec<String>>>,
@@ -74,7 +74,11 @@ impl WaylandState {
     // layer must not depend on `storage`) — the daemon keeps its read-side
     // `ClipboardDb` handle in its own scope and passes it explicitly to
     // whatever needs it (see `daemon::handle_restore_request`).
-    pub fn new_daemon(job_tx: mpsc::Sender<ClipboardJob>, verbose: bool, config: Arc<crate::core::config::Config>) -> Self {
+    pub fn new_daemon(
+        job_tx: mpsc::Sender<ClipboardJob>,
+        verbose: bool,
+        config: Arc<crate::core::config::Config>,
+    ) -> Self {
         Self {
             manager: None,
             manager_id: None,
@@ -93,7 +97,11 @@ impl WaylandState {
         }
     }
 
-    pub fn new_action(target_mime: String, verbose: bool, config: Arc<crate::core::config::Config>) -> Self {
+    pub fn new_action(
+        target_mime: String,
+        verbose: bool,
+        config: Arc<crate::core::config::Config>,
+    ) -> Self {
         Self {
             manager: None,
             manager_id: None,

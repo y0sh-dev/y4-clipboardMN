@@ -7,7 +7,7 @@ use crate::core::constants::*;
 use crate::daemon::metrics::DaemonMetrics;
 use crate::storage::ClipboardDb;
 use crate::wayland::state::ClipboardJob;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 /// Owns the single writer connection and its background thread. All
 /// persistence goes through this one channel, so SQLite only ever sees one
@@ -17,7 +17,12 @@ pub struct DbWorker {
 }
 
 impl DbWorker {
-    pub fn spawn(mut db: ClipboardDb, metrics: Arc<DaemonMetrics>, verbose: bool, max_history: usize) -> Self {
+    pub fn spawn(
+        mut db: ClipboardDb,
+        metrics: Arc<DaemonMetrics>,
+        verbose: bool,
+        max_history: usize,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<ClipboardJob>();
 
         std::thread::spawn(move || {

@@ -9,25 +9,25 @@
 // panic in (see [lints.clippy] in Cargo.toml).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-mod daemon;
-mod list;
-mod show;
-mod copy_to;
-mod paste_from;
-mod store;
-mod search;
 mod cleaning;
-mod pin;
-mod unpin;
-mod help;
-mod status;
-mod pause;
-mod resume;
+mod copy_to;
+mod daemon;
 pub mod formatter;
+mod help;
+mod list;
+mod paste_from;
+mod pause;
+mod pin;
+mod resume;
+mod search;
+mod show;
+mod status;
+mod store;
+mod unpin;
 mod utils;
 
-use crate::storage::ClipboardDb;
 use crate::core::constants::*;
+use crate::storage::ClipboardDb;
 
 /// Signal handed back to `main.rs` for the two commands whose real backend
 /// call (`daemon::start_daemon`, `wayland::paste_from_os`) would otherwise
@@ -70,32 +70,36 @@ pub fn handle_command(args: &[String], mut db: ClipboardDb) -> CliAction {
         // --- System Operations ---
         // "daemon"/"paste-from" only resolve their arguments here; starting
         // the daemon / talking to wayland is deferred to `main.rs`.
-        "daemon"     => return match daemon::run(args) {
-            Some(verbose) => CliAction::RunDaemon(db, verbose),
-            None => CliAction::None,
-        },
-        "list"       => list::run(args, &db),
-        "search"     => search::run(args, &db),
-        "show"       => show::run(args, &db),
-        "copy-to"    => copy_to::run(args, &mut db),
-        "store"      => store::run(args, &mut db),
+        "daemon" => {
+            return match daemon::run(args) {
+                Some(verbose) => CliAction::RunDaemon(db, verbose),
+                None => CliAction::None,
+            };
+        }
+        "list" => list::run(args, &db),
+        "search" => search::run(args, &db),
+        "show" => show::run(args, &db),
+        "copy-to" => copy_to::run(args, &mut db),
+        "store" => store::run(args, &mut db),
 
         // --- Management ---
-        "delete"     => cleaning::delete_run(args, &mut db),
-        "wipe"       => cleaning::wipe_run(args, &mut db),
-        "pin"        => pin::run(args, &mut db),
-        "unpin"      => unpin::run(args, &mut db),
+        "delete" => cleaning::delete_run(args, &mut db),
+        "wipe" => cleaning::wipe_run(args, &mut db),
+        "pin" => pin::run(args, &mut db),
+        "unpin" => unpin::run(args, &mut db),
 
         // --- Utilities ---
-        "paste-from" => return match paste_from::run(args) {
-            Some(mime) => CliAction::PasteFrom(mime),
-            None => CliAction::None,
-        },
-        "status"     => status::run(args),
-        "pause"      => pause::run(args),
-        "resume"     => resume::run(args),
-        "help"       => help::print_help(),
-        "version"    => help::print_version(),
+        "paste-from" => {
+            return match paste_from::run(args) {
+                Some(mime) => CliAction::PasteFrom(mime),
+                None => CliAction::None,
+            };
+        }
+        "status" => status::run(args),
+        "pause" => pause::run(args),
+        "resume" => resume::run(args),
+        "help" => help::print_help(),
+        "version" => help::print_version(),
 
         _ => {
             eprintln!("{}unknown command: '{}'", LOG_ERROR, cmd);

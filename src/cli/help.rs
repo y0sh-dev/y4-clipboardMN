@@ -44,11 +44,13 @@ pub fn print_help() {
 
     println!("    list [range]       - Display history metadata. Supports range (e.g., 0-50).");
     println!("                         Flags: --raw (-R), --full (-A), --id (-i).");
-    
+
     println!("    search <keywords...> - Keyword scan metadata using SQLite indexing.");
-    println!("                         Multiple keywords AND-match (space-separated or repeated args).");
+    println!(
+        "                         Multiple keywords AND-match (space-separated or repeated args)."
+    );
     println!("                         Flags: --raw (-R), --id (-i).");
-    
+
     println!("    copy-to <target>   - Restore record to clipboard via IPC synchronization.");
     println!("                         Accepts index or stable ID (via --id flag).");
     println!("                         Flags: --id (-i), --verbose (-v).");
@@ -59,13 +61,15 @@ pub fn print_help() {
 
     println!("    store [mime]       - Ingest stdin to storage and sync with active daemon.");
     println!("                         Flags: --verbose (-v).");
-    
+
     println!("    paste-from [mime]  - Access system clipboard directly. Bypasses database.");
 
     println!("\nMANAGEMENT:");
-    println!("    delete <target>    - Physically remove a specific record from persistent storage.");
+    println!(
+        "    delete <target>    - Physically remove a specific record from persistent storage."
+    );
     println!("                         Flags: --id (-i).");
-    
+
     println!("    wipe               - Purge all history and execute SQLite VACUUM.");
     println!("                         Flags: --force (-f) [REQUIRED].");
 
@@ -80,14 +84,15 @@ pub fn print_help() {
     println!("    -V, --version      - Show version information.");
     println!("    -v, --verbose      - Enable detailed system and transfer logging.");
 
-
     println!("\nPRACTICAL EXAMPLES:");
     println!("    # 1. High-speed selection with fzf using Stable IDs:");
-    println!("    $ y4p list 0-100 --raw --id | fzf | awk '{{print $1}}' | xargs -r y4p copy-to --id");
-    
+    println!(
+        "    $ y4p list 0-100 --raw --id | fzf | awk '{{print $1}}' | xargs -r y4p copy-to --id"
+    );
+
     println!("\n    # 2. Extracting binary content from history:");
     println!("    $ y4p show 12 --id --raw > recovered_asset.webp");
-    
+
     println!("\n    # 3. Manual ingestion with custom MIME:");
     println!("    $ cat data.json | y4p store application/json");
 

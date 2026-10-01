@@ -3,9 +3,9 @@
 
 // src/cli/pin.rs
 
-use crate::storage::ClipboardDb;
-use crate::core::constants::*;
 use crate::cli::utils::ArgContext;
+use crate::core::constants::*;
+use crate::storage::ClipboardDb;
 
 /// Mark a history record as pinned. Pinned records are exempt from
 /// `upsert_record`'s automatic rotation eviction (see storage/db.rs), but
@@ -18,11 +18,19 @@ pub fn run(args: &[String], db: &mut ClipboardDb) {
 /// target resolution (MRU index by default, immutable ID via `--id`/`-i`,
 /// same as `cleaning::delete_run`), differing only in the target pin state
 /// and the command name used in messages.
-pub(crate) fn set_pin_state(args: &[String], db: &mut ClipboardDb, is_pinned: bool, cmd_name: &str) {
+pub(crate) fn set_pin_state(
+    args: &[String],
+    db: &mut ClipboardDb,
+    is_pinned: bool,
+    cmd_name: &str,
+) {
     let ctx = ArgContext::parse(args);
 
     if !ctx.unknown_flags.is_empty() || ctx.raw || ctx.full || ctx.force || ctx.verbose {
-        eprintln!("{}command '{}' does not support specified options.", LOG_ERROR, cmd_name);
+        eprintln!(
+            "{}command '{}' does not support specified options.",
+            LOG_ERROR, cmd_name
+        );
         return;
     }
 

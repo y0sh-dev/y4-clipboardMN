@@ -3,13 +3,13 @@
 
 // src/wayland/mod.rs
 
-pub mod state;
 pub mod handlers;
+pub mod state;
 
-use wayland_client::{Connection, EventQueue};
 pub use self::state::WaylandState;
 use std::os::fd::{AsFd, AsRawFd};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
+use wayland_client::{Connection, EventQueue};
 
 /// Establish a connection to the Wayland compositor. `None` when no
 /// compositor is reachable (e.g. `DISPLAY`/`WAYLAND_DISPLAY` unset) — the
@@ -23,7 +23,9 @@ pub fn create_connection() -> Option<(Connection, EventQueue<WaylandState>)> {
 /// Extract data from the system clipboard with strict timeout and lifecycle management.
 /// Prevents indefinite hangs by using poll-based non-blocking dispatch.
 pub fn paste_from_os(mime: &str) -> Vec<u8> {
-    let Some((conn, mut event_queue)) = create_connection() else { return Vec::new(); };
+    let Some((conn, mut event_queue)) = create_connection() else {
+        return Vec::new();
+    };
     let qh = event_queue.handle();
     let _registry = conn.display().get_registry(&qh, ());
 
@@ -45,12 +47,12 @@ pub fn paste_from_os(mime: &str) -> Vec<u8> {
     // 2. Poll-based acquisition loop with timeout protection
     let start_time = Instant::now();
     let timeout = Duration::from_secs(1); // 1-second absolute watchdog timeout
-    
+
     let wayland_fd = conn.as_fd().as_raw_fd();
-    let mut poll_fds = [libc::pollfd { 
-        fd: wayland_fd, 
-        events: libc::POLLIN, 
-        revents: 0 
+    let mut poll_fds = [libc::pollfd {
+        fd: wayland_fd,
+        events: libc::POLLIN,
+        revents: 0,
     }];
 
     while !state.selection_received {
@@ -74,7 +76,9 @@ pub fn paste_from_os(mime: &str) -> Vec<u8> {
                         // Dispatch the events now residing in the internal queue
                         let _ = event_queue.dispatch_pending(&mut state);
                     }
-                    Err(wayland_client::backend::WaylandError::Io(ie)) if ie.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(wayland_client::backend::WaylandError::Io(ie))
+                        if ie.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
                         // Ignore transient EAGAIN
                     }
                     Err(_) => break, // Connection severed

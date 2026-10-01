@@ -3,9 +3,9 @@
 
 // src/cli/show.rs
 
-use crate::storage::ClipboardDb;
-use crate::core::constants::*;
 use crate::cli::utils::ArgContext;
+use crate::core::constants::*;
+use crate::storage::ClipboardDb;
 use std::io::{self, Write};
 
 /// Inspect entry metadata and payload using index or persistent database ID.
@@ -13,7 +13,10 @@ pub fn run(args: &[String], db: &ClipboardDb) {
     let ctx = ArgContext::parse(args);
 
     if !ctx.unknown_flags.is_empty() || ctx.full || ctx.force {
-        eprintln!("{}command 'show' does not support specified options.", LOG_ERROR);
+        eprintln!(
+            "{}command 'show' does not support specified options.",
+            LOG_ERROR
+        );
         return;
     }
 

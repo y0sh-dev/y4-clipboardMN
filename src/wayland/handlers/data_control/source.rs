@@ -3,20 +3,29 @@
 
 // src/wayland/handlers/data_control/source.rs
 
-use wayland_client::{Dispatch, Connection, QueueHandle};
-use wayland_protocols::ext::data_control::v1::client::ext_data_control_source_v1::{self, ExtDataControlSourceV1};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::Path;
-use crate::wayland::state::{WaylandState, SourceMetadata, SourcePayload};
 use super::mime_is_compatible;
 use crate::core::constants::*;
 use crate::core::utils::{is_html_mime, strip_html_tags};
+use crate::wayland::state::{SourceMetadata, SourcePayload, WaylandState};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::Path;
+use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::ext::data_control::v1::client::ext_data_control_source_v1::{
+    self, ExtDataControlSourceV1,
+};
 
 // --- ExtDataControlSourceV1 ---
 
 impl Dispatch<ExtDataControlSourceV1, SourceMetadata> for WaylandState {
-    fn event(state: &mut Self, _source: &ExtDataControlSourceV1, ev: ext_data_control_source_v1::Event, meta: &SourceMetadata, _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        state: &mut Self,
+        _source: &ExtDataControlSourceV1,
+        ev: ext_data_control_source_v1::Event,
+        meta: &SourceMetadata,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         match ev {
             ext_data_control_source_v1::Event::Send { mime_type, fd } => {
                 // SAFETY: `raw` is the valid, open fd the compositor just
@@ -80,7 +89,7 @@ impl Dispatch<ExtDataControlSourceV1, SourceMetadata> for WaylandState {
             }
             ext_data_control_source_v1::Event::Cancelled => {
                 state.current_source = None;
-                
+
                 if state.verbose {
                     println!("{}clipboard ownership relinquished.", LOG_INFO);
                 }
@@ -107,7 +116,12 @@ fn send_via_sendfile(path: &Path, dest: OwnedFd) {
     let src_file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("{}egress: failed to open cached payload {}: {}", LOG_ERROR, path.display(), e);
+            eprintln!(
+                "{}egress: failed to open cached payload {}: {}",
+                LOG_ERROR,
+                path.display(),
+                e
+            );
             return;
         }
     };
@@ -116,7 +130,12 @@ fn send_via_sendfile(path: &Path, dest: OwnedFd) {
     let total_len = match src_file.metadata() {
         Ok(m) => m.len(),
         Err(e) => {
-            eprintln!("{}egress: failed to stat cached payload {}: {}", LOG_ERROR, path.display(), e);
+            eprintln!(
+                "{}egress: failed to stat cached payload {}: {}",
+                LOG_ERROR,
+                path.display(),
+                e
+            );
             return;
         }
     };
@@ -143,11 +162,18 @@ fn send_via_sendfile(path: &Path, dest: OwnedFd) {
                 Some(libc::EINVAL) | Some(libc::ENOSYS) => {
                     fallback_copy(src_file, dest_file, offset as u64, total_len);
                 }
-                _ => eprintln!("{}egress: sendfile failed for {}: {}", LOG_ERROR, path.display(), err),
+                _ => eprintln!(
+                    "{}egress: sendfile failed for {}: {}",
+                    LOG_ERROR,
+                    path.display(),
+                    err
+                ),
             }
             return;
         }
-        if n == 0 { break; } // Shouldn't happen before `remaining` hits 0; stop cleanly rather than spin.
+        if n == 0 {
+            break;
+        } // Shouldn't happen before `remaining` hits 0; stop cleanly rather than spin.
         remaining -= n as usize;
     }
 
@@ -157,8 +183,15 @@ fn send_via_sendfile(path: &Path, dest: OwnedFd) {
 /// Userspace copy fallback for `send_via_sendfile`, resuming from wherever
 /// `sendfile(2)` left off (`start_offset`) rather than restarting the
 /// transfer from byte zero.
-fn fallback_copy(mut src: std::fs::File, mut dest: std::fs::File, start_offset: u64, total_len: u64) {
-    if src.seek(SeekFrom::Start(start_offset)).is_err() { return; }
+fn fallback_copy(
+    mut src: std::fs::File,
+    mut dest: std::fs::File,
+    start_offset: u64,
+    total_len: u64,
+) {
+    if src.seek(SeekFrom::Start(start_offset)).is_err() {
+        return;
+    }
     let mut buf = vec![0u8; 65536];
     let mut copied = start_offset;
     while copied < total_len {
@@ -167,9 +200,10 @@ fn fallback_copy(mut src: std::fs::File, mut dest: std::fs::File, start_offset: 
             Ok(n) => n,
             Err(_) => break,
         };
-        if dest.write_all(&buf[..n]).is_err() { break; }
+        if dest.write_all(&buf[..n]).is_err() {
+            break;
+        }
         copied += n as u64;
     }
     let _ = dest.flush();
 }
-

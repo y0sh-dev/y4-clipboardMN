@@ -3,8 +3,8 @@
 
 // src/cli/daemon.rs
 
-use crate::core::constants::*;
 use crate::cli::utils::ArgContext;
+use crate::core::constants::*;
 
 /// Validate `daemon` command arguments and print the pre-start banner.
 /// Returns the resolved `verbose` flag on success, `None` on any validation
@@ -15,13 +15,19 @@ pub fn run(args: &[String]) -> Option<bool> {
 
     // Strict validation: 'daemon' permits only --verbose/-v and zero positional arguments
     if !ctx.unknown_flags.is_empty() || ctx.raw || ctx.full || ctx.force {
-        eprintln!("{}command 'daemon' does not support specified options.", LOG_ERROR);
+        eprintln!(
+            "{}command 'daemon' does not support specified options.",
+            LOG_ERROR
+        );
         return None;
     }
 
     // Arity enforcement: ensure no positional arguments are provided
     if !ctx.positionals.is_empty() {
-        eprintln!("{}command 'daemon' does not accept positional arguments.", LOG_ERROR);
+        eprintln!(
+            "{}command 'daemon' does not accept positional arguments.",
+            LOG_ERROR
+        );
         println!("usage: y4p daemon [--verbose | -v]");
         return None;
     }

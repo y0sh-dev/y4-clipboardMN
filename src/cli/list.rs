@@ -3,10 +3,10 @@
 
 // src/cli/list.rs
 
-use crate::storage::ClipboardDb;
 use super::formatter;
-use super::utils::{self, RangeSelection, ArgContext};
+use super::utils::{self, ArgContext, RangeSelection};
 use crate::core::constants::*;
+use crate::storage::ClipboardDb;
 
 // `pub(crate)`: also named directly by `search.rs`, which builds the same
 // (abs_idx, &row) shape from its own `search_metadata` results, to avoid
@@ -20,13 +20,19 @@ pub fn run(args: &[String], db: &ClipboardDb) {
 
     // Strict validation: check for unknown flags
     if !ctx.unknown_flags.is_empty() {
-        eprintln!("{}unknown option detected: '{}'", LOG_ERROR, ctx.unknown_flags[0]);
+        eprintln!(
+            "{}unknown option detected: '{}'",
+            LOG_ERROR, ctx.unknown_flags[0]
+        );
         return;
     }
 
     // Arity enforcement: list accepts at most one positional argument (the range)
     if ctx.positionals.len() > 1 {
-        eprintln!("{}command 'list' accepts only one range argument.", LOG_ERROR);
+        eprintln!(
+            "{}command 'list' accepts only one range argument.",
+            LOG_ERROR
+        );
         return;
     }
 
@@ -38,7 +44,7 @@ pub fn run(args: &[String], db: &ClipboardDb) {
             return;
         }
     };
-    
+
     let max_history = crate::core::get_max_history();
     let all_items = db.fetch_metadata(max_history);
     let total_stored = db.get_total_count();
@@ -50,7 +56,11 @@ pub fn run(args: &[String], db: &ClipboardDb) {
     } else {
         match selection {
             RangeSelection::Single(n) => {
-                if n < len { vec![(n, &all_items[n])] } else { vec![] }
+                if n < len {
+                    vec![(n, &all_items[n])]
+                } else {
+                    vec![]
+                }
             }
             RangeSelection::Range(start, end) => {
                 if len == 0 {
@@ -60,24 +70,36 @@ pub fn run(args: &[String], db: &ClipboardDb) {
                     let e = end.min(len - 1);
                     if s <= e {
                         // Capture the original absolute index 'i'
-                        all_items.iter().enumerate().skip(s).take(e - s + 1).collect()
+                        all_items
+                            .iter()
+                            .enumerate()
+                            .skip(s)
+                            .take(e - s + 1)
+                            .collect()
                     } else {
                         vec![]
                     }
                 }
             }
-            RangeSelection::Latest(limit) => {
-                all_items.iter().enumerate().take(limit).collect()
-            }
+            RangeSelection::Latest(limit) => all_items.iter().enumerate().take(limit).collect(),
         }
     };
 
     if target_items.is_empty() {
-        if !ctx.raw { println!("{}no entries found matching the criteria.", LOG_INFO); }
+        if !ctx.raw {
+            println!("{}no entries found matching the criteria.", LOG_INFO);
+        }
         return;
     }
 
-    render_list("Clipboard History", &target_items, total_stored, ctx.raw, ctx.use_id, max_history);
+    render_list(
+        "Clipboard History",
+        &target_items,
+        total_stored,
+        ctx.raw,
+        ctx.use_id,
+        max_history,
+    );
 }
 
 /// Render metadata items in a structured table layout.
@@ -94,7 +116,8 @@ pub fn render_list(
     // slot prepended to the label (see formatter::pin_marker) — reserved for
     // every row, pinned or not, so the table's column alignment never shifts.
     let label_width = 7;
-    let total_width = WIDTH_ID + WIDTH_WHEN + WIDTH_SIZE + PREVIEW_WIDTH + label_width + (TABLE_SEP.len() * 3);
+    let total_width =
+        WIDTH_ID + WIDTH_WHEN + WIDTH_SIZE + PREVIEW_WIDTH + label_width + (TABLE_SEP.len() * 3);
 
     if !is_raw {
         println!("\n--- {} ---", title);
@@ -117,10 +140,18 @@ pub fn render_list(
         let label = formatter::get_label(mime);
 
         // Use absolute history index 'abs_idx' instead of local loop counter
-        let id_to_display = if use_id { real_id.to_string() } else { abs_idx.to_string() };
+        let id_to_display = if use_id {
+            real_id.to_string()
+        } else {
+            abs_idx.to_string()
+        };
 
         let raw_preview = if mime.starts_with("image/") {
-            format!("[{}] - {} bytes", mime.split('/').nth(1).unwrap_or(""), size)
+            format!(
+                "[{}] - {} bytes",
+                mime.split('/').nth(1).unwrap_or(""),
+                size
+            )
         } else {
             preview.as_deref().unwrap_or("").to_string()
         };
@@ -133,7 +164,10 @@ pub fn render_list(
             // regardless of pin state.
             println!(
                 "[{:>wid_id$}] {} {} {}",
-                id_to_display, formatter::pin_marker_raw(*is_pinned), label, formatted_preview,
+                id_to_display,
+                formatter::pin_marker_raw(*is_pinned),
+                label,
+                formatted_preview,
                 wid_id = WIDTH_ID / 2
             );
         } else {
@@ -155,12 +189,15 @@ pub fn render_list(
             );
         }
     }
-    
+
     if !is_raw {
         println!("{}", TABLE_LINE_CHAR.repeat(total_width));
         println!(
-            "{}shown {} items | history: {} / {} entries", 
-            LOG_INFO, items.len(), total_stored, max_history
+            "{}shown {} items | history: {} / {} entries",
+            LOG_INFO,
+            items.len(),
+            total_stored,
+            max_history
         );
     }
 }

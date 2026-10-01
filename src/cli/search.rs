@@ -3,11 +3,11 @@
 
 // src/cli/search.rs
 
-use crate::storage::ClipboardDb;
-use crate::core::constants::*;
-use crate::cli::utils::ArgContext;
-use std::collections::HashSet;
 use super::list::{self, IndexItem};
+use crate::cli::utils::ArgContext;
+use crate::core::constants::*;
+use crate::storage::ClipboardDb;
+use std::collections::HashSet;
 
 /// Search through metadata history and render results using strict argument validation.
 pub fn run(args: &[String], db: &ClipboardDb) {
@@ -15,7 +15,10 @@ pub fn run(args: &[String], db: &ClipboardDb) {
 
     // Strict validation: 'search' only supports --raw/-R and --verbose/-v
     if !ctx.unknown_flags.is_empty() || ctx.full || ctx.force {
-        eprintln!("{}command 'search' does not support specified options.", LOG_ERROR);
+        eprintln!(
+            "{}command 'search' does not support specified options.",
+            LOG_ERROR
+        );
         return;
     }
 
@@ -23,7 +26,9 @@ pub fn run(args: &[String], db: &ClipboardDb) {
     // and/or a single quoted string — split on whitespace and dedupe so
     // both `search rust wayland` and `search "rust wayland"` behave alike.
     let mut seen = HashSet::new();
-    let keywords: Vec<String> = ctx.positionals.iter()
+    let keywords: Vec<String> = ctx
+        .positionals
+        .iter()
         .flat_map(|s| s.split_whitespace())
         .map(str::to_string)
         .filter(|kw| seen.insert(kw.clone()))
@@ -41,12 +46,20 @@ pub fn run(args: &[String], db: &ClipboardDb) {
     let (valid, invalid) = db.validate_keywords(&keywords);
 
     if valid.is_empty() {
-        println!("{}no entries matching '{}' were found.", LOG_INFO, keywords.join(" "));
+        println!(
+            "{}no entries matching '{}' were found.",
+            LOG_INFO,
+            keywords.join(" ")
+        );
         return;
     }
 
     if !invalid.is_empty() {
-        eprintln!("{}ignored non-existent keywords: '{}'", LOG_WARN, invalid.join(" "));
+        eprintln!(
+            "{}ignored non-existent keywords: '{}'",
+            LOG_WARN,
+            invalid.join(" ")
+        );
     }
 
     // Execute metadata-level search via indexed SQLite query. Each hit now
@@ -60,13 +73,27 @@ pub fn run(args: &[String], db: &ClipboardDb) {
     let total_stored = db.get_total_count();
 
     if results.is_empty() {
-        println!("{}no entries matching '{}' were found.", LOG_INFO, valid.join(" "));
+        println!(
+            "{}no entries matching '{}' were found.",
+            LOG_INFO,
+            valid.join(" ")
+        );
         return;
     }
 
-    let refs: Vec<IndexItem> = results.iter().map(|(abs_idx, item)| (*abs_idx, item)).collect();
+    let refs: Vec<IndexItem> = results
+        .iter()
+        .map(|(abs_idx, item)| (*abs_idx, item))
+        .collect();
 
     let title = format!("search: '{}' ({} hits)", valid.join(" AND "), results.len());
 
-    list::render_list(&title, &refs, total_stored, ctx.raw, ctx.use_id, max_history);
+    list::render_list(
+        &title,
+        &refs,
+        total_stored,
+        ctx.raw,
+        ctx.use_id,
+        max_history,
+    );
 }

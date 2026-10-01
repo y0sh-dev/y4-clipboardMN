@@ -14,7 +14,8 @@ pub struct SchemaManager;
 
 impl SchemaManager {
     pub fn initialize(conn: &mut Connection, timeout_ms: u64) -> Result<(), String> {
-        conn.busy_timeout(std::time::Duration::from_millis(timeout_ms)).ok();
+        conn.busy_timeout(std::time::Duration::from_millis(timeout_ms))
+            .ok();
         let _ = conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -55,7 +56,8 @@ impl SchemaManager {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pinned_ts ON clipboard(is_pinned, timestamp DESC)",
             [],
-        ).ok();
+        )
+        .ok();
 
         Ok(())
     }
@@ -75,7 +77,11 @@ impl SchemaManager {
         )
         .map_err(|e| format!("schema initialization failed: {}", e))?;
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON clipboard(timestamp)", []).ok();
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ts ON clipboard(timestamp)",
+            [],
+        )
+        .ok();
         Ok(())
     }
 
@@ -88,8 +94,11 @@ impl SchemaManager {
             .unwrap_or(false);
 
         if !has_column {
-            conn.execute("ALTER TABLE clipboard ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0", [])
-                .map_err(|e| format!("v2 migration failed: {}", e))?;
+            conn.execute(
+                "ALTER TABLE clipboard ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| format!("v2 migration failed: {}", e))?;
         }
 
         // Index creation for is_pinned lives in `initialize` (unconditional,

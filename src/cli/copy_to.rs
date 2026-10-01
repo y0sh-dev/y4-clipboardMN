@@ -3,24 +3,30 @@
 
 // src/cli/copy_to.rs
 
-use crate::storage::ClipboardDb;
-use crate::core::constants::*;
 use crate::cli::utils::ArgContext;
-use std::os::unix::net::UnixStream;
+use crate::core::constants::*;
+use crate::storage::ClipboardDb;
 use std::io::Write;
+use std::os::unix::net::UnixStream;
 
 /// Re-broadcast an entry to the system clipboard using MRU index or database ID.
 pub fn run(args: &[String], db: &mut ClipboardDb) {
     let ctx = ArgContext::parse(args);
 
     if !ctx.unknown_flags.is_empty() || ctx.raw || ctx.full || ctx.force {
-        eprintln!("{}command 'copy-to' does not support specified options.", LOG_ERROR);
+        eprintln!(
+            "{}command 'copy-to' does not support specified options.",
+            LOG_ERROR
+        );
         return;
     }
 
     let input_str = match ctx.positionals.first() {
         Some(s) => s,
-        None => { eprintln!("{}missing ID.", LOG_ERROR); return; }
+        None => {
+            eprintln!("{}missing ID.", LOG_ERROR);
+            return;
+        }
     };
 
     let real_id = match crate::cli::utils::resolve_target_id(input_str, ctx.use_id, db) {
@@ -40,12 +46,14 @@ pub fn run(args: &[String], db: &mut ClipboardDb) {
             let mut payload = vec![IPC_CMD_RESTORE];
             payload.extend_from_slice(real_id.to_string().as_bytes());
             payload.push(IPC_DELIMITER);
-            
+
             if stream.write_all(&payload).is_ok() {
                 let _ = stream.flush();
                 // Logs the resolved persistent ID (not the raw CLI input,
                 // which may have been an MRU offset rather than an ID at all).
-                if ctx.verbose { println!("{}", log_restore(real_id as usize)); }
+                if ctx.verbose {
+                    println!("{}", log_restore(real_id as usize));
+                }
             }
         }
         Err(_) => {

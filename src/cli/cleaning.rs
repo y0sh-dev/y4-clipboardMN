@@ -3,16 +3,19 @@
 
 // src/cli/cleaning.rs
 
-use crate::storage::ClipboardDb;
-use crate::core::constants::*;
 use crate::cli::utils::ArgContext;
+use crate::core::constants::*;
+use crate::storage::ClipboardDb;
 
 /// Remove a history record by its MRU index or persistent database ID.
 pub fn delete_run(args: &[String], db: &mut ClipboardDb) {
     let ctx = ArgContext::parse(args);
 
     if !ctx.unknown_flags.is_empty() || ctx.raw || ctx.full || ctx.force || ctx.verbose {
-        eprintln!("{}command 'delete' does not support specified options.", LOG_ERROR);
+        eprintln!(
+            "{}command 'delete' does not support specified options.",
+            LOG_ERROR
+        );
         return;
     }
 
@@ -45,12 +48,18 @@ pub fn wipe_run(args: &[String], db: &mut ClipboardDb) {
 
     // Strict validation: 'wipe' accepts ONLY --force/-f and 0 positional arguments.
     if !ctx.unknown_flags.is_empty() || ctx.raw || ctx.full || ctx.verbose {
-        eprintln!("{}command 'wipe' does not support specified options.", LOG_ERROR);
+        eprintln!(
+            "{}command 'wipe' does not support specified options.",
+            LOG_ERROR
+        );
         return;
     }
 
     if !ctx.positionals.is_empty() {
-        eprintln!("{}command 'wipe' does not accept positional arguments.", LOG_ERROR);
+        eprintln!(
+            "{}command 'wipe' does not accept positional arguments.",
+            LOG_ERROR
+        );
         return;
     }
 
@@ -62,7 +71,10 @@ pub fn wipe_run(args: &[String], db: &mut ClipboardDb) {
     }
 
     match db.wipe() {
-        Ok(_) => println!("{}storage purged and optimized (VACUUM completed).", LOG_INFO),
+        Ok(_) => println!(
+            "{}storage purged and optimized (VACUUM completed).",
+            LOG_INFO
+        ),
         Err(e) => eprintln!("{}database reset failure: {}", LOG_ERROR, e),
     }
 }

@@ -18,15 +18,15 @@
 
 // src/main.rs
 
+mod cli;
 mod core;
+mod daemon;
 mod storage;
 mod wayland;
-mod daemon;
-mod cli;
 
-use std::io::Write;
 use crate::cli::CliAction;
 use crate::core::constants::*;
+use std::io::Write;
 
 fn main() {
     // Ignore SIGPIPE: a reader disappearing mid-write (e.g. a Wayland client
@@ -34,7 +34,9 @@ fn main() {
     // EPIPE on the write, never as process termination.
     // SAFETY: `signal` is called with a valid signal number and one of the
     // two `SIG_*` constants, per its documented contract.
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
 
     let args: Vec<String> = std::env::args().collect();
     let is_daemon_invocation = args.get(1).map(String::as_str) == Some("daemon");
@@ -67,7 +69,8 @@ fn main() {
             // process, if any, is left completely untouched.
             std::process::exit(130);
         }
-    }).expect("failed to set signal handler");
+    })
+    .expect("failed to set signal handler");
 
     // Robustness: handle database open errors without panicking.
     let db = match storage::ClipboardDb::open() {
@@ -100,7 +103,10 @@ fn main() {
             let raw = wayland::paste_from_os(&mime);
 
             if raw.is_empty() {
-                eprintln!("{}null or empty payload retrieved for MIME: {}", LOG_ERROR, mime);
+                eprintln!(
+                    "{}null or empty payload retrieved for MIME: {}",
+                    LOG_ERROR, mime
+                );
                 std::process::exit(1);
             }
 

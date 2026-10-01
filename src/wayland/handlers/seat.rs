@@ -3,9 +3,9 @@
 
 // src/wayland/handlers/seat.rs
 
-use wayland_client::{protocol::wl_seat, Connection, Dispatch, QueueHandle};
-use crate::wayland::state::WaylandState;
 use crate::core::constants::*;
+use crate::wayland::state::WaylandState;
+use wayland_client::{Connection, Dispatch, QueueHandle, protocol::wl_seat};
 
 impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
     fn event(
@@ -20,17 +20,23 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
             // Stability: Handle notifications for seat capabilities (pointer, keyboard, touch)
             wl_seat::Event::Capabilities { capabilities } => {
                 let caps = capabilities.into_result();
-                
+
                 if state.verbose {
                     // Process events exclusively when capabilities are parsed successfully
                     if let Ok(real_caps) = caps {
                         let mut cap_list = Vec::new();
-                        if real_caps.contains(wl_seat::Capability::Pointer)  { cap_list.push("pointer"); }
-                        if real_caps.contains(wl_seat::Capability::Keyboard) { cap_list.push("keyboard"); }
-                        if real_caps.contains(wl_seat::Capability::Touch)    { cap_list.push("touch"); }
-                        
+                        if real_caps.contains(wl_seat::Capability::Pointer) {
+                            cap_list.push("pointer");
+                        }
+                        if real_caps.contains(wl_seat::Capability::Keyboard) {
+                            cap_list.push("keyboard");
+                        }
+                        if real_caps.contains(wl_seat::Capability::Touch) {
+                            cap_list.push("touch");
+                        }
+
                         let caps_str = cap_list.join(", ");
-                        
+
                         // Output structured runtime metrics via standard print macros
                         println!("Seat capabilities changed: [{}]", caps_str);
                     } else {
@@ -41,9 +47,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
 
             // Robustness: Handle seat identification name strings (e.g., "seat0")
             wl_seat::Event::Name { name } if state.verbose => {
-                    // Pinpoint active tracking targets to streamline diagnostic processes
-                    // and eliminate silent ingestion deadlocks in multi-seat profiles.
-                    println!("{}", log_seat_detected(&name, "identified"));
+                // Pinpoint active tracking targets to streamline diagnostic processes
+                // and eliminate silent ingestion deadlocks in multi-seat profiles.
+                println!("{}", log_seat_detected(&name, "identified"));
             }
             _ => {}
         }

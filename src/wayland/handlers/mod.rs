@@ -6,11 +6,11 @@
 pub mod data_control;
 pub mod seat;
 
-use wayland_client::{protocol::wl_registry, Connection, Dispatch, QueueHandle};
-use wayland_protocols::ext::data_control::v1::client::ext_data_control_manager_v1::ExtDataControlManagerV1;
-use wayland_client::protocol::wl_seat::WlSeat;
-use crate::wayland::state::WaylandState;
 use crate::core::constants::*;
+use crate::wayland::state::WaylandState;
+use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::{Connection, Dispatch, QueueHandle, protocol::wl_registry};
+use wayland_protocols::ext::data_control::v1::client::ext_data_control_manager_v1::ExtDataControlManagerV1;
 
 impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
     fn event(
@@ -22,15 +22,21 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
         qh: &QueueHandle<Self>,
     ) {
         match ev {
-            wl_registry::Event::Global { name, interface, version } => {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => {
                 // Strict Version Negotiation: Ensure requested version <= advertised version.
                 // Our implementation is compatible with version 1 of ext-data-control.
                 if interface == INTERFACE_MANAGER && version >= 1 {
                     let manager = reg.bind::<ExtDataControlManagerV1, _, _>(name, 1, qh, ());
                     state.manager = Some(manager);
                     state.manager_id = Some(name);
-                    
-                    if state.verbose { println!("{}", log_protocol_bound(INTERFACE_MANAGER)); }
+
+                    if state.verbose {
+                        println!("{}", log_protocol_bound(INTERFACE_MANAGER));
+                    }
                 }
 
                 // Standard seat binding: Use the reported version for maximum feature set (within v7 capability).
@@ -40,7 +46,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     state.seat = Some(seat);
                     state.seat_id = Some(name);
 
-                    if state.verbose { println!("{}", log_protocol_bound(INTERFACE_SEAT)); }
+                    if state.verbose {
+                        println!("{}", log_protocol_bound(INTERFACE_SEAT));
+                    }
                 }
             }
 
@@ -58,8 +66,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     // Critical: Clear the dependent device to trigger re-initialization
                     state.device = None;
 
-                    if state.verbose { 
-                        eprintln!("{}active wayland seat removed (ID: {}).", LOG_INFO, name); 
+                    if state.verbose {
+                        eprintln!("{}active wayland seat removed (ID: {}).", LOG_INFO, name);
                     }
                 }
             }

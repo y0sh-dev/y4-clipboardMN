@@ -101,8 +101,22 @@ pub fn parse_range(arg: Option<&String>, default_limit: usize) -> Result<RangeSe
         let n1_s = parts.first().unwrap_or(&"").trim();
         let n2_s = parts.get(1).unwrap_or(&"").trim();
 
-        let n1 = if n1_s.is_empty() { None } else { Some(n1_s.parse::<usize>().map_err(|_| format!("invalid index: {}", n1_s))?) };
-        let n2 = if n2_s.is_empty() { None } else { Some(n2_s.parse::<usize>().map_err(|_| format!("invalid index: {}", n2_s))?) };
+        let n1 = if n1_s.is_empty() {
+            None
+        } else {
+            Some(
+                n1_s.parse::<usize>()
+                    .map_err(|_| format!("invalid index: {}", n1_s))?,
+            )
+        };
+        let n2 = if n2_s.is_empty() {
+            None
+        } else {
+            Some(
+                n2_s.parse::<usize>()
+                    .map_err(|_| format!("invalid index: {}", n2_s))?,
+            )
+        };
 
         return match (n1, n2) {
             (Some(start), Some(end)) => Ok(RangeSelection::Range(start.min(end), start.max(end))),
@@ -114,13 +128,18 @@ pub fn parse_range(arg: Option<&String>, default_limit: usize) -> Result<RangeSe
             // "however far a usize can go" instead of undefined/panicking
             // behavior — the subsequent `.min(len - 1)` clamp in
             // `cli/list.rs` already bounds it to something sane in practice.
-            (Some(start), None) => Ok(RangeSelection::Range(start, start.saturating_add(default_limit))),
+            (Some(start), None) => Ok(RangeSelection::Range(
+                start,
+                start.saturating_add(default_limit),
+            )),
             (None, Some(end)) => Ok(RangeSelection::Range(0, end)),
             _ => Err(format!("invalid range: {}", s)),
         };
     }
 
-    let n = s.parse::<usize>().map_err(|_| format!("invalid ID: {}", s))?;
+    let n = s
+        .parse::<usize>()
+        .map_err(|_| format!("invalid ID: {}", s))?;
     Ok(RangeSelection::Single(n))
 }
 
@@ -137,7 +156,9 @@ pub fn parse_range(arg: Option<&String>, default_limit: usize) -> Result<RangeSe
 /// as the immutable ID when true, otherwise resolved as an offset into the
 /// current MRU history via `fetch_metadata`.
 pub fn resolve_target_id(input: &str, use_id: bool, db: &ClipboardDb) -> Result<i64, String> {
-    let val = input.parse::<i64>().map_err(|_| format!("invalid numerical value: '{}'", input))?;
+    let val = input
+        .parse::<i64>()
+        .map_err(|_| format!("invalid numerical value: '{}'", input))?;
     if val < 0 {
         return Err(format!("index cannot be negative: {}", val));
     }

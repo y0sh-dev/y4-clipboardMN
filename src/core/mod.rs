@@ -3,15 +3,15 @@
 
 // src/core/mod.rs
 
+pub mod config;
 pub mod constants;
 pub mod utils;
-pub mod config;
 
-use std::path::{Path, PathBuf};
+use crate::core::constants::{DB_DIR_NAME, DB_FILE_NAME, ENV_MAX_HISTORY, SOCKET_FILE_NAME};
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::core::constants::{DB_DIR_NAME, DB_FILE_NAME, SOCKET_FILE_NAME, ENV_MAX_HISTORY};
 
 pub static SIG_EXIT: AtomicBool = AtomicBool::new(false);
 
@@ -114,7 +114,9 @@ pub fn get_socket_path() -> PathBuf {
 
     // Fallback: still per-user (uid-suffixed) to avoid cross-user collisions.
     // SAFETY: `getuid()` takes no arguments and cannot fail.
-    PathBuf::from(format!("/tmp/{}.{}.sock", DB_DIR_NAME, unsafe { libc::getuid() }))
+    PathBuf::from(format!("/tmp/{}.{}.sock", DB_DIR_NAME, unsafe {
+        libc::getuid()
+    }))
 }
 
 pub fn request_exit() {
@@ -132,7 +134,9 @@ pub struct SocketGuard {
 
 impl SocketGuard {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        Self { path: path.as_ref().to_path_buf() }
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
     }
 }
 

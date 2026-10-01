@@ -7,21 +7,21 @@ mod ipc;
 mod metrics;
 mod worker;
 
-use crate::storage::{ClipboardDb, ContentLocation};
-use crate::wayland;
-use crate::wayland::state::{WaylandState, SourceMetadata, SourcePayload};
+use crate::core::SocketGuard;
 use crate::core::constants::*;
 use crate::core::utils::is_html_mime;
-use crate::core::SocketGuard;
+use crate::storage::{ClipboardDb, ContentLocation};
+use crate::wayland;
+use crate::wayland::state::{SourceMetadata, SourcePayload, WaylandState};
 use ipc::Command;
 use metrics::DaemonMetrics;
-use worker::DbWorker;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::io::Write;
 use std::fs;
+use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd};
-use std::time::Duration;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
+use std::time::Duration;
+use worker::DbWorker;
 
 /// Initialize and run the clipboard daemon with a unified, high-performance event loop.
 ///
@@ -53,7 +53,12 @@ pub fn start_daemon(mut db: ClipboardDb, verbose: bool) -> bool {
     let listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("{}failed to bind IPC socket at {}: {}", LOG_ERROR, socket_path.display(), e);
+            eprintln!(
+                "{}failed to bind IPC socket at {}: {}",
+                LOG_ERROR,
+                socket_path.display(),
+                e
+            );
             return false;
         }
     };
@@ -81,7 +86,10 @@ pub fn start_daemon(mut db: ClipboardDb, verbose: bool) -> bool {
     let read_db = match ClipboardDb::open() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("{}failed to open read-side database handle: {}", LOG_ERROR, e);
+            eprintln!(
+                "{}failed to open read-side database handle: {}",
+                LOG_ERROR, e
+            );
             return false;
         }
     };
@@ -92,7 +100,10 @@ pub fn start_daemon(mut db: ClipboardDb, verbose: bool) -> bool {
         return false;
     }
     if !bind_data_device(&mut state, &qh, &conn) {
-        eprintln!("{}compositor does not advertise {} and/or {}; cannot serve clipboard.", LOG_ERROR, INTERFACE_MANAGER, INTERFACE_SEAT);
+        eprintln!(
+            "{}compositor does not advertise {} and/or {}; cannot serve clipboard.",
+            LOG_ERROR, INTERFACE_MANAGER, INTERFACE_SEAT
+        );
         return false;
     }
 
@@ -117,36 +128,57 @@ pub fn start_daemon(mut db: ClipboardDb, verbose: bool) -> bool {
         }
 
         let mut poll_fds = [
-            libc::pollfd { fd: conn.as_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: listener.as_fd().as_raw_fd(),  events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: conn.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: listener.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
 
         // SAFETY: `poll_fds` is a valid, correctly-sized array of `pollfd`
         // for `poll(2)` to read from and write `revents` back into.
-        if unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, 500) } < 0 { continue; }
+        if unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, 500) } < 0 {
+            continue;
+        }
 
         // IPC Ingress Handling: Status replies inline via `accept_and_dispatch`;
         // Exit/Restore are dispatched here, same as before.
         if poll_fds[1].revents & libc::POLLIN != 0
-            && let Some(cmd) = ipc::accept_and_dispatch(&listener, || metrics.format_status(state.paused)) {
-                match cmd {
-                    Command::Exit => crate::core::request_exit(),
-                    Command::Restore(real_id) => handle_restore_request(&mut state, &qh, real_id, &conn, &metrics, &read_db),
-                    Command::Status => {}
-                    Command::Pause => {
-                        state.paused = true;
-                        if state.verbose { println!("{}{}", LOG_INFO, MSG_MONITOR_PAUSED); }
-                    }
-                    Command::Resume => {
-                        state.paused = false;
-                        if state.verbose { println!("{}{}", LOG_INFO, MSG_MONITOR_RESUMED); }
+            && let Some(cmd) =
+                ipc::accept_and_dispatch(&listener, || metrics.format_status(state.paused))
+        {
+            match cmd {
+                Command::Exit => crate::core::request_exit(),
+                Command::Restore(real_id) => {
+                    handle_restore_request(&mut state, &qh, real_id, &conn, &metrics, &read_db)
+                }
+                Command::Status => {}
+                Command::Pause => {
+                    state.paused = true;
+                    if state.verbose {
+                        println!("{}{}", LOG_INFO, MSG_MONITOR_PAUSED);
                     }
                 }
+                Command::Resume => {
+                    state.paused = false;
+                    if state.verbose {
+                        println!("{}{}", LOG_INFO, MSG_MONITOR_RESUMED);
+                    }
+                }
+            }
         }
 
-        if poll_fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 { break; }
+        if poll_fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+            break;
+        }
         if poll_fds[0].revents & libc::POLLIN != 0
-        && let Some(guard) = event_queue.prepare_read() {
+            && let Some(guard) = event_queue.prepare_read()
+        {
             let _ = guard.read();
         }
     }
@@ -164,7 +196,9 @@ fn bind_data_device(
     qh: &wayland_client::QueueHandle<WaylandState>,
     conn: &wayland_client::Connection,
 ) -> bool {
-    if state.device.is_some() { return true; }
+    if state.device.is_some() {
+        return true;
+    }
 
     if let (Some(manager), Some(seat)) = (&state.manager, &state.seat) {
         state.device = Some(manager.get_data_device(seat, qh, ()));
@@ -200,12 +234,14 @@ fn handle_restore_request(
     let resolved = read_db.locate_content(real_id);
 
     if let Some((mime, location)) = resolved
-        && let Some(ref manager) = state.manager {
+        && let Some(ref manager) = state.manager
+    {
         state.provider_locks += 1;
 
         let payload = match location {
             ContentLocation::InlineBlob(id) => {
-                let data = read_db.get_content_by_id(id)
+                let data = read_db
+                    .get_content_by_id(id)
                     .map(|(_, d)| d)
                     .unwrap_or_default();
                 SourcePayload::Owned(data)
@@ -213,7 +249,10 @@ fn handle_restore_request(
             ContentLocation::CacheFile(path) => SourcePayload::File(path),
         };
 
-        let meta = SourceMetadata { mime: mime.clone(), payload };
+        let meta = SourceMetadata {
+            mime: mime.clone(),
+            payload,
+        };
 
         let source = manager.create_data_source(qh, meta);
 
@@ -223,13 +262,17 @@ fn handle_restore_request(
 
         if is_html_mime(&mime) {
             for alt in HTML_MIME_ALTS {
-                if *alt != mime { source.offer(alt.to_string()); }
+                if *alt != mime {
+                    source.offer(alt.to_string());
+                }
             }
         } else if mime.contains("text") || mime.contains("UTF8") {
             // Covers the text/plain family and text/uri-list (already
             // contains "text") with the same plain-text alternates.
             for alt in TEXT_MIME_ALTS {
-                if *alt != mime { source.offer(alt.to_string()); }
+                if *alt != mime {
+                    source.offer(alt.to_string());
+                }
             }
         }
 
