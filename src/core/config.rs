@@ -21,7 +21,9 @@ pub struct GeneralConfig {
 
 impl Default for GeneralConfig {
     fn default() -> Self {
-        Self { max_history: DEFAULT_MAX_HISTORY }
+        Self {
+            max_history: DEFAULT_MAX_HISTORY,
+        }
     }
 }
 
@@ -47,7 +49,10 @@ impl Config {
     /// when that variable isn't set (mirroring `core::get_db_path`'s own XDG
     /// fallback chain for consistency).
     pub fn get_config_path() -> PathBuf {
-        build_config_path(std::env::var("XDG_CONFIG_HOME").ok().as_deref(), std::env::var("HOME").ok().as_deref())
+        build_config_path(
+            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+        )
     }
 
     /// Loads and parses the config file, falling back to `Config::default()`
@@ -61,46 +66,31 @@ impl Config {
     }
 
     /// Parses the fixed subset of TOML this schema needs: `[section]`
-    /// headers, `key = value` pairs (booleans, unsigned integers, quoted
-    /// strings, and single-/multi-line string arrays), and `#` comments
-    /// (a `#` inside a quoted string is not treated as one). Never panics:
-    /// an unrecognised section/key, a value that doesn't parse as the type
+    /// headers, `key = value` pairs (booleans and unsigned integers — the
+    /// schema holds no string or array values), and `#` comments (a `#`
+    /// inside a quoted string is not treated as one). Never panics: an
+    /// unrecognised section/key, a value that doesn't parse as the type
     /// that key expects, or any other malformed line is simply skipped,
     /// leaving whatever default was already set for that field.
     pub fn parse(content: &str) -> Self {
         let mut config = Self::default();
-        let lines: Vec<&str> = content.lines().map(strip_comment).collect();
         let mut section = String::new();
-        let mut i = 0;
 
-        while i < lines.len() {
-            let line = lines[i].trim();
-            i += 1;
-            if line.is_empty() { continue; }
+        for line in content.lines().map(strip_comment) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
 
             if line.starts_with('[') && line.ends_with(']') && !line.contains('=') {
                 section = line[1..line.len() - 1].trim().to_string();
                 continue;
             }
 
-            let Some((key, value_start)) = line.split_once('=') else { continue; };
-            let key = key.trim();
-            let mut value = value_start.trim().to_string();
-
-            // Multi-line array: the opening `[` was seen but not yet its
-            // closing `]` — keep folding subsequent (already comment-
-            // stripped) lines in until one closes it, or the file ends.
-            if value.starts_with('[') && !value.ends_with(']') {
-                while i < lines.len() {
-                    let next = lines[i].trim();
-                    i += 1;
-                    value.push(' ');
-                    value.push_str(next);
-                    if next.ends_with(']') { break; }
-                }
-            }
-
-            apply_kv(&mut config, &section, key, value.trim());
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            apply_kv(&mut config, &section, key.trim(), value.trim());
         }
 
         config
@@ -167,10 +157,14 @@ fn parse_usize(value: &str) -> Option<usize> {
 fn apply_kv(config: &mut Config, section: &str, key: &str, value: &str) {
     match (section, key) {
         ("general", "max_history") => {
-            if let Some(n) = parse_usize(value) { config.general.max_history = n; }
+            if let Some(n) = parse_usize(value) {
+                config.general.max_history = n;
+            }
         }
         ("mime", "drop_rtf") => {
-            if let Some(b) = parse_bool(value) { config.mime.drop_rtf = b; }
+            if let Some(b) = parse_bool(value) {
+                config.mime.drop_rtf = b;
+            }
         }
         _ => {}
     }
@@ -242,7 +236,10 @@ mod tests {
     fn parse_hash_inside_quoted_string_is_preserved() {
         // The comment-stripping scanner itself is exercised directly here,
         // since no remaining schema key holds a quoted string value.
-        assert_eq!(strip_comment(r#"foo = "weird#value" # trailing"#), r#"foo = "weird#value" "#);
+        assert_eq!(
+            strip_comment(r#"foo = "weird#value" # trailing"#),
+            r#"foo = "weird#value" "#
+        );
     }
 
     #[test]
@@ -295,7 +292,10 @@ mod tests {
     #[test]
     fn should_drop_rtf_mirrors_the_mime_config_field() {
         assert!(Config::default().should_drop_rtf());
-        let config = Config { mime: MimeConfig { drop_rtf: false }, ..Default::default() };
+        let config = Config {
+            mime: MimeConfig { drop_rtf: false },
+            ..Default::default()
+        };
         assert!(!config.should_drop_rtf());
     }
 
