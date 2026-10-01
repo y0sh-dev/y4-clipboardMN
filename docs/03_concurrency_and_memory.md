@@ -25,8 +25,6 @@ pub fn spawn(mut db: ClipboardDb, metrics: Arc<DaemonMetrics>, verbose: bool, ma
                 Ok(_) => metrics.record_ingress(),
                 Err(e) => eprintln!("worker failed to persist data: {}", e),
             }
-            #[cfg(target_os = "linux")]
-            unsafe { libc::malloc_trim(0); }
         }
     });
 
@@ -89,21 +87,3 @@ Connection::open_with_flags(
 ```
 
 As of v0.2.5, this constructor exists but is not yet the one `read_db` or any CLI read path actually calls — today they still open through the ordinary read-write `open()`, exactly as before. Wiring `read_db` and the read-only CLI commands (`list`, `search`, `show`) over to `open_read_only` is tracked for v0.3.0 (see the `TODO(v0.3.0)` marker in `storage/mod.rs`). The v0.2.5 change is deliberately scoped to landing the enforcement primitive on its own — a constructor whose only job is opening a connection SQLite itself will refuse to let write, ready for the call sites that will adopt it next.
-
----
-
-## Why `malloc_trim(0)` is called explicitly
-
-Rust's global allocator doesn't return freed memory to the OS right away, as a matter of course.
-
-Like most general-purpose allocators, it keeps recently-freed pages around, on the assumption the next allocation will be a similar size and can reuse them. That's the right tradeoff for most workloads.
-
-But for a daemon meant to sit resident for an entire login session, that assumption breaks down — for exactly the case `y4p` exists to handle well. A single 70MB image ingestion allocates a large buffer once. Without an explicit signal, the allocator has no particular reason to ever give that memory back. The process's Resident Set Size can end up permanently reflecting the largest thing it ever copied, rather than what it's actually holding right now.
-
-`libc::malloc_trim(0)` is the explicit "give it back" instruction.
-
-`y4p` calls it in both places a large payload's memory is freed shortly after use. Once in the ingestion handler, right after a job is handed off (`wayland/handlers/data_control/device.rs`). And once in the DB worker, right after a job is persisted (`daemon/worker.rs`).
-
-Calling it unconditionally — after every job, including tiny text snippets — is deliberate, not an oversight. `malloc_trim` is cheap when there's little to trim. Gating it behind a size threshold would mean maintaining a second piece of state, just to avoid a call that's already inexpensive in the common case.
-
-The `#[cfg(target_os = "linux")]` guard reflects what this really is: a glibc/Linux allocator API, specifically. It's not part of the semantics the rest of the daemon depends on. Just a periodic hint, to this one platform's allocator.

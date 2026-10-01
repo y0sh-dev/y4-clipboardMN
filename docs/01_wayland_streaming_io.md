@@ -38,37 +38,37 @@ One tradeoff this buys: no locking between "Wayland event" and "IPC command" han
 
 ---
 
-## Why ingestion is one pass, not two
+## How ingestion reads, normalises, then hashes
 
-The naive way to "read data, then hash it" is two separate steps.
+Turning a compositor's pipe into a stored record is three distinct decisions — how much to read, how to interpret it, and when to fingerprint it — and `y4p` keeps them in that fixed order rather than interleaving them.
 
-Read it all into a buffer. Then loop over that buffer again to compute the hash. For a 70MB image, that's a second full sweep across tens of thousands of cache lines — memory that may have already been evicted by the time the second pass gets to it.
+First, the whole payload is read in one bounded call:
 
-`y4p` updates the hasher inline, inside the same read loop. Each chunk gets hashed exactly once, while it's still hot in cache:
+```rust
+// src/wayland/handlers/data_control/device.rs — ingest_and_send
+let mut payload = Vec::new();
+let mut reader = read_file.take(268435456); // 256MiB ceiling
+if reader.read_to_end(&mut payload).is_err() || payload.is_empty() { return; }
+```
+
+`Read::take` caps the transfer at 256MiB regardless of what the sender offers to write — a misbehaving clipboard source can't turn one ingestion into an unbounded allocation. `read_to_end` is the standard library's own fully-buffered read; there's no bespoke chunk loop or page-aligned buffer to maintain here, because nothing on this path needs one — ingestion already runs off the daemon's main `poll` loop entirely, on its own per-selection spawned thread (see above), so a straightforward buffered read costs nothing the design cares about.
+
+Second, the buffered payload is normalised, and — where the offered label can't be trusted outright — re-identified from its own bytes. `normalise_payload` re-detects images by their magic bytes (`core::utils::detect_image_mime`) and rewrites `text/uri-list` payloads into plain, percent-decoded paths (`core::utils::normalize_uri_list`):
 
 ```rust
 // src/wayland/handlers/data_control/device.rs
-let mut chunk_buffer = super::AlignedBuffer::new(65536, 4096);
-let chunk = chunk_buffer.as_mut_slice();
-let mut hasher = (!is_uri_list).then(Sha3_256::new);
-
-while let Ok(n) = reader.read(chunk) {
-    if n == 0 { break; }
-    let data = &chunk[..n];
-    if let Some(h) = hasher.as_mut() { h.update(data); }
-    payload.extend_from_slice(data);
-}
+let Some((final_mime, payload)) = normalise_payload(mime_to_get, payload) else { return; };
 ```
 
-The 4096-byte alignment isn't cosmetic, either.
+Only then is the result hashed, exactly once, over the bytes that are actually about to be persisted:
 
-It matches the Linux kernel's page size. Each `read()` from the compositor's pipe lands cleanly on a page boundary, instead of straddling two. That keeps the kernel-to-userspace copy on the cheapest path available, for the pipe sizes `y4p` configures — see `make_pipe`'s `F_SETPIPE_SZ` bump to 4MB for image transfers.
+```rust
+let mut hasher = Sha3_256::new();
+hasher.update(&payload);
+let hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+```
 
-There's one deliberate exception: `text/uri-list`.
-
-A uri-list has to be normalized before it's persisted — `core::utils::normalize_uri_list` strips `file://` prefixes and re-encodes escaped paths. So the fingerprint needs to match what actually ends up in the database, not the raw pre-normalization bytes.
-
-Hashing the raw bytes could let two different offers that normalize to the same paths fail to dedupe correctly, or the reverse. So uri-list buffers first, normalizes, and hashes once, after the fact. It's the only MIME type on that slower path. Everything else keeps the single-pass loop above.
+Hashing after normalisation, not before, is what makes deduplication correct: two offers that normalise to the same `text/uri-list` paths — different `file://` escaping, say — collapse into the same fingerprint, because the hash is computed over what they both became, not over how each one happened to arrive.
 
 ---
 
