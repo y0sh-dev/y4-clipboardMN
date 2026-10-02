@@ -61,21 +61,18 @@ impl Config {
     }
 
     /// Parses the fixed subset of TOML this schema needs: `[section]`
-    /// headers, `key = value` pairs (booleans, unsigned integers, quoted
-    /// strings, and single-/multi-line string arrays), and `#` comments
-    /// (a `#` inside a quoted string is not treated as one). Never panics:
-    /// an unrecognised section/key, a value that doesn't parse as the type
+    /// headers, `key = value` pairs (booleans and unsigned integers — the
+    /// schema holds no string or array values), and `#` comments (a `#`
+    /// inside a quoted string is not treated as one). Never panics: an
+    /// unrecognised section/key, a value that doesn't parse as the type
     /// that key expects, or any other malformed line is simply skipped,
     /// leaving whatever default was already set for that field.
     pub fn parse(content: &str) -> Self {
         let mut config = Self::default();
-        let lines: Vec<&str> = content.lines().map(strip_comment).collect();
         let mut section = String::new();
-        let mut i = 0;
 
-        while i < lines.len() {
-            let line = lines[i].trim();
-            i += 1;
+        for line in content.lines().map(strip_comment) {
+            let line = line.trim();
             if line.is_empty() { continue; }
 
             if line.starts_with('[') && line.ends_with(']') && !line.contains('=') {
@@ -83,24 +80,8 @@ impl Config {
                 continue;
             }
 
-            let Some((key, value_start)) = line.split_once('=') else { continue; };
-            let key = key.trim();
-            let mut value = value_start.trim().to_string();
-
-            // Multi-line array: the opening `[` was seen but not yet its
-            // closing `]` — keep folding subsequent (already comment-
-            // stripped) lines in until one closes it, or the file ends.
-            if value.starts_with('[') && !value.ends_with(']') {
-                while i < lines.len() {
-                    let next = lines[i].trim();
-                    i += 1;
-                    value.push(' ');
-                    value.push_str(next);
-                    if next.ends_with(']') { break; }
-                }
-            }
-
-            apply_kv(&mut config, &section, key, value.trim());
+            let Some((key, value)) = line.split_once('=') else { continue; };
+            apply_kv(&mut config, &section, key.trim(), value.trim());
         }
 
         config
