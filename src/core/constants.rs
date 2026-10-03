@@ -34,6 +34,14 @@ pub const IPC_STATUS_TIMEOUT_MS: u64 = 1000;
 // runtime environment, not just a fixed string.
 pub const SOCKET_FILE_NAME: &str = "y4p.sock";
 
+// --- Wayland Ingestion I/O ---
+// Upper bound on a single clipboard payload read from a compositor pipe
+// (device.rs's `read_bounded_payload`). Enforced by reading one byte beyond
+// this cap: a stream that is actually larger is thereby told apart from one
+// that exactly fits, and discarded outright rather than silently truncated
+// and persisted as corrupt data.
+pub const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
+
 // --- Security & Privacy Configuration ---
 // Clipboard security: MIME types to exclude from persistent storage
 pub const SENSITIVE_MIME_HINTS: &[&str] = &[

@@ -65,21 +65,19 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
             // Offload ingestion and persistence to the worker thread
             if let Some(ref tx) = state.job_tx {
                 let job_tx_clone = tx.clone();
-                // S-07: uri-list must be fully buffered and normalized before
-                // hashing (the fingerprint has to match what's actually
-                // persisted), so it can't share the other MIMEs' single-pass
-                // hash-while-read below.
-                let is_uri_list = mime_to_get == MIME_URI_LIST;
-
                 std::thread::spawn(move || {
-                    ingest_and_send(read_file, mime_to_get, is_uri_list, &job_tx_clone);
+                    ingest_and_send(read_file, mime_to_get, &job_tx_clone);
                 });
             } else {
-                // Action Mode: Synchronous read for immediate CLI processing
-                let mut buf = Vec::new();
-                let mut reader = read_file.take(268435456);
-                let _ = reader.read_to_end(&mut buf);
-                state.rx_buf = buf;
+                // Action Mode: synchronous read for immediate CLI processing.
+                // Applies the same boundary guard and normalisation as the
+                // daemon path (`ingest_and_send`) so `paste-from` returns
+                // exactly the bytes that would otherwise have been persisted.
+                if let Some(payload) = read_bounded_payload(read_file, MAX_PAYLOAD_BYTES)
+                    && let Some((_, payload)) = normalise_payload(mime_to_get, payload)
+                {
+                    state.rx_buf = payload;
+                }
             }
         }
     }
@@ -126,19 +124,9 @@ pub(crate) fn select_mime(mimes: &[String], target_mime: Option<&str>, drop_rtf:
 ///
 /// Factored out of the Selection handler so it can be called from the
 /// dedicated per-selection thread the handler spawns.
-fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: bool, job_tx: &mpsc::Sender<ClipboardJob>) {
-    let mut payload = Vec::new();
-    let mut reader = read_file.take(268435456);
-
-    if reader.read_to_end(&mut payload).is_err() || payload.is_empty() { return; }
-    let mut final_mime = mime_to_get;
-
-    if is_uri_list {
-        payload = crate::core::utils::normalize_uri_list(&payload);
-        if payload.is_empty() { return; }
-    } else if let Some(m) = crate::core::utils::detect_image_mime(&payload) {
-        final_mime = m.to_string();
-    }
+fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, job_tx: &mpsc::Sender<ClipboardJob>) {
+    let Some(payload) = read_bounded_payload(read_file, MAX_PAYLOAD_BYTES) else { return; };
+    let Some((final_mime, payload)) = normalise_payload(mime_to_get, payload) else { return; };
 
     // SHA3-256 fingerprint of the final normalised payload actually being persisted.
     let mut hasher = Sha3_256::new();
@@ -147,6 +135,61 @@ fn ingest_and_send(read_file: std::fs::File, mime_to_get: String, is_uri_list: b
 
     // Send the completed payload and its SHA3 fingerprint to the persistent worker.
     let _ = job_tx.send(ClipboardJob { mime: final_mime, data: payload, hash });
+}
+
+/// Reads at most `limit` bytes from an already-`offer.receive()`d pipe.
+/// Takes one byte more than `limit` so a stream that genuinely exceeds it
+/// can be told apart from one that exactly fits: `Read::take` stops
+/// silently at its cap with no error, so without this probe byte a
+/// truncated transfer and a complete one would both return `Ok(_)` with no
+/// way to distinguish them — and the truncated bytes already read would
+/// otherwise be persisted as if they were the whole payload (the
+/// Truncation vulnerability this guards against). Returns `None` on an I/O
+/// error, an empty read, or a stream that exceeded `limit`; in every case
+/// the caller discards whatever bytes were read rather than keeping a
+/// partial payload.
+fn read_bounded_payload<R: Read>(reader: R, limit: u64) -> Option<Vec<u8>> {
+    let mut payload = Vec::new();
+    let mut bounded = reader.take(limit + 1);
+    if bounded.read_to_end(&mut payload).is_err() {
+        return None;
+    }
+    if payload.is_empty() || payload.len() as u64 > limit {
+        return None;
+    }
+    Some(payload)
+}
+
+/// Normalises a raw payload against the MIME it was requested as, applying
+/// the same treatment regardless of whether the caller is the daemon's
+/// ingestion thread or Action Mode's synchronous read (see both call
+/// sites in the `Selection` handler above):
+/// - `text/uri-list` (matched via `mime_base_eq`, so parameters/case on the
+///   offer don't matter) is percent-decoded and validated into one path per
+///   line — see `core::utils::normalize_uri_list` — since the fingerprint
+///   persisted downstream has to match what's actually stored, not the raw
+///   wire bytes.
+/// - Anything else is re-identified by magic bytes in case the sender
+///   mislabelled an image (see `core::utils::detect_image_mime`); the bytes
+///   themselves are never altered in this branch.
+///
+/// Returns `None` only when a `text/uri-list` payload normalises away to
+/// nothing (no valid paths) — never for any other MIME, since a non-empty
+/// raw read is always usable as-is.
+fn normalise_payload(mime_to_get: String, payload: Vec<u8>) -> Option<(String, Vec<u8>)> {
+    if crate::core::utils::mime_base_eq(&mime_to_get, MIME_URI_LIST) {
+        let normalised = crate::core::utils::normalize_uri_list(&payload);
+        if normalised.is_empty() {
+            return None;
+        }
+        return Some((mime_to_get, normalised));
+    }
+
+    if let Some(m) = crate::core::utils::detect_image_mime(&payload) {
+        return Some((m.to_string(), payload));
+    }
+
+    Some((mime_to_get, payload))
 }
 
 #[cfg(test)]
@@ -231,6 +274,92 @@ mod tests {
         let offers: Vec<String> = Vec::new();
         assert_eq!(select_mime(&offers, None, true), None);
         assert_eq!(select_mime(&offers, Some("text/plain"), true), None);
+    }
+
+    // --- read_bounded_payload ---
+
+    #[test]
+    fn read_bounded_payload_within_limit_returns_payload() {
+        let data = b"hello".as_slice();
+        assert_eq!(read_bounded_payload(data, 10), Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn read_bounded_payload_exactly_at_limit_returns_payload() {
+        let data = b"abcde".as_slice();
+        assert_eq!(read_bounded_payload(data, 5), Some(b"abcde".to_vec()));
+    }
+
+    #[test]
+    fn read_bounded_payload_exceeding_limit_by_one_byte_is_discarded() {
+        let data = b"abcdef".as_slice();
+        assert_eq!(read_bounded_payload(data, 5), None);
+    }
+
+    #[test]
+    fn read_bounded_payload_massively_oversized_stream_is_discarded_not_truncated() {
+        // The crux of the truncation vulnerability: a stream far larger
+        // than the limit must be rejected outright, never silently cut
+        // down to `limit` bytes and handed back as if it were complete.
+        let data = vec![b'x'; 1000];
+        assert_eq!(read_bounded_payload(data.as_slice(), 5), None);
+    }
+
+    #[test]
+    fn read_bounded_payload_empty_input_returns_none() {
+        let data = b"".as_slice();
+        assert_eq!(read_bounded_payload(data, 10), None);
+    }
+
+    // --- normalise_payload ---
+
+    #[test]
+    fn normalise_payload_plain_text_passes_through_unchanged() {
+        let result = normalise_payload("text/plain".to_string(), b"hello world".to_vec());
+        assert_eq!(result, Some(("text/plain".to_string(), b"hello world".to_vec())));
+    }
+
+    #[test]
+    fn normalise_payload_uri_list_is_normalised() {
+        let raw = b"file:///path/to/a.txt\nfile:///path/to/b.png".to_vec();
+        let result = normalise_payload(MIME_URI_LIST.to_string(), raw);
+        assert_eq!(
+            result,
+            Some((MIME_URI_LIST.to_string(), b"/path/to/a.txt\n/path/to/b.png".to_vec()))
+        );
+    }
+
+    #[test]
+    fn normalise_payload_uri_list_mime_with_parameters_is_still_recognised() {
+        // A sender announcing "text/uri-list; charset=utf-8" (or any case
+        // variant) must still be routed through URI-list normalisation —
+        // mirrors `select_mime`'s own use of `mime_base_eq` elsewhere.
+        let raw = b"file:///a.txt".to_vec();
+        let result = normalise_payload("TEXT/URI-LIST; charset=UTF-8".to_string(), raw);
+        assert_eq!(
+            result,
+            Some(("TEXT/URI-LIST; charset=UTF-8".to_string(), b"/a.txt".to_vec()))
+        );
+    }
+
+    #[test]
+    fn normalise_payload_uri_list_with_no_valid_paths_returns_none() {
+        let raw = b"# just a comment\n\n".to_vec();
+        assert_eq!(normalise_payload(MIME_URI_LIST.to_string(), raw), None);
+    }
+
+    #[test]
+    fn normalise_payload_reidentifies_image_by_magic_bytes() {
+        let png_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let result = normalise_payload("application/octet-stream".to_string(), png_bytes.clone());
+        assert_eq!(result, Some(("image/png".to_string(), png_bytes)));
+    }
+
+    #[test]
+    fn normalise_payload_non_image_non_uri_list_mime_is_untouched() {
+        let raw = b"# just text, not uri-list or an image".to_vec();
+        let result = normalise_payload("text/markdown".to_string(), raw.clone());
+        assert_eq!(result, Some(("text/markdown".to_string(), raw)));
     }
 }
 
