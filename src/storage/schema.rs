@@ -106,11 +106,13 @@ impl SchemaManager {
     /// predicate `upsert_record` uses to decide TEXT vs BLOB at insert time.
     fn migrate_to_v3(conn: &mut Connection) -> Result<(), String> {
         conn.execute(
-            "UPDATE clipboard
-             SET content = CAST(content AS TEXT)
-             WHERE content IS NOT NULL
-               AND (mime LIKE '%text%' OR mime LIKE '%uri-list%' OR mime LIKE '%json%'
-                    OR mime = 'text/html' OR mime LIKE '%xhtml%')",
+            &format!(
+                "UPDATE clipboard
+                 SET content = CAST(content AS TEXT)
+                 WHERE content IS NOT NULL
+                   AND {}",
+                crate::storage::db::TEXT_MIME_SQL_PREDICATE
+            ),
             [],
         )
         .map_err(|e| format!("v3 migration failed: {}", e))?;

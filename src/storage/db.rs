@@ -8,8 +8,15 @@ use rusqlite::types::ValueRef;
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::constants::{SENSITIVE_MIME_HINTS, PREVIEW_CHARS};
-use crate::core::utils::strip_html_tags;
+use crate::core::utils::{is_html_mime, is_text_like_mime, strip_html_tags};
 use super::MetaRow;
+
+/// SQL predicate matching textual MIME types eligible for search indexing and
+/// v3 storage migration, aligned with `core::utils::is_text_like_mime`.
+///
+/// Images (such as `image/svg+xml`) are explicitly excluded because their payloads
+/// are offloaded to `FileCache` and stored with `content = NULL`.
+pub const TEXT_MIME_SQL_PREDICATE: &str = "(mime NOT LIKE 'image/%' AND (mime LIKE '%text%' OR mime LIKE '%utf8%' OR mime LIKE '%json%' OR mime LIKE '%xml%' OR mime LIKE '%uri-list%' OR mime LIKE '%string%'))";
 
 /// Result of `upsert_record`: `real_id == -1` means the payload was
 /// deliberately skipped (empty / sensitive MIME) and no rotation ran.
@@ -63,8 +70,8 @@ impl SqliteStore {
             // `content` storage class below, so search's `content LIKE ?`
             // (see search_metadata/validate_keywords) always lines up with
             // what actually got stored as TEXT vs BLOB.
-            let is_markup = mime == "text/html" || mime.contains("xhtml");
-            let is_text_like = mime.contains("text") || mime.contains("uri-list") || mime.contains("json") || is_markup;
+            let is_markup = is_html_mime(mime);
+            let is_text_like = is_text_like_mime(mime);
 
             let preview = if is_text_like {
                 // Rich markup's raw tags aren't a readable preview — strip
@@ -179,7 +186,7 @@ impl SqliteStore {
             "SELECT (SELECT COUNT(*) FROM clipboard c2 WHERE c2.timestamp > c1.timestamp) AS abs_idx,
                     id, timestamp, mime, size, preview, is_pinned
              FROM clipboard c1
-             WHERE (mime LIKE '%text%' OR mime LIKE '%UTF8%')
+             WHERE {TEXT_MIME_SQL_PREDICATE}
                AND {}
              ORDER BY timestamp DESC LIMIT ?{}",
             and_clauses.join(" AND "), limit_idx
@@ -214,15 +221,20 @@ impl SqliteStore {
         let mut valid = Vec::new();
         let mut invalid = Vec::new();
 
+        let sql = format!(
+            "SELECT 1 FROM clipboard
+             WHERE {TEXT_MIME_SQL_PREDICATE}
+               AND (preview LIKE ?1 OR content LIKE ?1)
+             LIMIT 1"
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return (valid, keywords.to_vec()),
+        };
+
         for kw in keywords {
             let pattern = format!("%{}%", kw);
-            let exists = self.conn.query_row(
-                "SELECT 1 FROM clipboard
-                 WHERE (mime LIKE '%text%' OR mime LIKE '%UTF8%')
-                   AND (preview LIKE ?1 OR content LIKE ?1)
-                 LIMIT 1",
-                params![pattern], |_| Ok(())
-            ).is_ok();
+            let exists = stmt.query_row(params![pattern], |_| Ok(())).is_ok();
 
             if exists { valid.push(kw.clone()); } else { invalid.push(kw.clone()); }
         }
