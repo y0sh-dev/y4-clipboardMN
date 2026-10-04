@@ -328,3 +328,235 @@ impl SqliteStore {
         ).unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Fully isolated, schema-migrated in-memory store — same `initialize`
+    /// path a real on-disk DB goes through, so these tests exercise the
+    /// genuine production schema rather than a hand-rolled stand-in.
+    fn test_store() -> SqliteStore {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::storage::schema::SchemaManager::initialize(&mut conn, 1000).unwrap();
+        SqliteStore::new(conn)
+    }
+
+    /// Back-doors a row's `timestamp` directly, bypassing the `SystemTime::
+    /// now()` wall clock `upsert_record`/`update_timestamp` use internally.
+    /// Rotation and MRU-ordering tests need rows at deterministic, strictly
+    /// distinct timestamps — relying on wall-clock granularity between
+    /// back-to-back calls in the same test risks ties that would make
+    /// `ORDER BY timestamp DESC` non-deterministic.
+    fn set_timestamp(store: &mut SqliteStore, hash: &str, ts: i64) {
+        store.conn.execute("UPDATE clipboard SET timestamp = ?1 WHERE hash = ?2", params![ts, hash]).unwrap();
+    }
+
+    // --- upsert_record: text vs. image storage ---
+
+    #[test]
+    fn upsert_record_text_payload_is_stored_as_text_and_readable() {
+        let mut store = test_store();
+        let outcome = store.upsert_record("text/plain", b"hello world", "h-text", 100).unwrap();
+
+        assert!(!outcome.is_image);
+        assert_ne!(outcome.real_id, -1);
+
+        let (mime, content, hash) = store.get_row_content(outcome.real_id).unwrap();
+        assert_eq!(mime, "text/plain");
+        assert_eq!(content, Some(b"hello world".to_vec()));
+        assert_eq!(hash, "h-text");
+    }
+
+    #[test]
+    fn upsert_record_image_payload_leaves_sqlite_content_null_for_file_cache_delegation() {
+        let mut store = test_store();
+        let outcome = store.upsert_record("image/png", &[0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4], "h-img", 100).unwrap();
+
+        assert!(outcome.is_image);
+        let (mime, has_content, hash) = store.get_row_location(outcome.real_id).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(!has_content, "image content must be NULL in SQLite — binary lives in the FileCache instead");
+        assert_eq!(hash, "h-img");
+    }
+
+    #[test]
+    fn upsert_record_text_mime_with_invalid_utf8_falls_back_to_blob_without_corruption() {
+        let mut store = test_store();
+        let raw = vec![0xFF, 0xFE, 0xFD, 0x00, 0x01];
+        let outcome = store.upsert_record("text/plain", &raw, "h-badutf8", 100).unwrap();
+
+        let (_, content, _) = store.get_row_content(outcome.real_id).unwrap();
+        assert_eq!(content, Some(raw), "non-UTF8 bytes must survive the BLOB fallback byte-for-byte");
+    }
+
+    #[test]
+    fn upsert_record_empty_payload_is_skipped_without_inserting() {
+        let mut store = test_store();
+        let outcome = store.upsert_record("text/plain", b"", "h-empty", 100).unwrap();
+
+        assert_eq!(outcome.real_id, -1);
+        assert_eq!(store.get_total_count(), 0);
+    }
+
+    #[test]
+    fn upsert_record_sensitive_mime_is_skipped_without_inserting() {
+        let mut store = test_store();
+        let outcome = store.upsert_record("x-kde-passwordManagerHint", b"secret value", "h-sensitive", 100).unwrap();
+
+        assert_eq!(outcome.real_id, -1);
+        assert_eq!(store.get_total_count(), 0);
+    }
+
+    #[test]
+    fn upsert_record_duplicate_hash_updates_existing_row_instead_of_duplicating() {
+        let mut store = test_store();
+        let first = store.upsert_record("text/plain", b"same content", "h-dup", 100).unwrap();
+        let second = store.upsert_record("text/plain", b"same content", "h-dup", 100).unwrap();
+
+        assert_eq!(first.real_id, second.real_id);
+        assert_eq!(store.get_total_count(), 1);
+    }
+
+    // --- upsert_record: rotation and pin protection (G-10) ---
+
+    #[test]
+    fn upsert_record_rotation_evicts_oldest_unpinned_row_when_over_capacity() {
+        let mut store = test_store();
+        let id1 = store.upsert_record("text/plain", b"one", "h1", 100).unwrap().real_id;
+        set_timestamp(&mut store, "h1", 1000);
+        let id2 = store.upsert_record("text/plain", b"two", "h2", 100).unwrap().real_id;
+        set_timestamp(&mut store, "h2", 2000);
+
+        // Third insert pushes the unpinned count to 3 against a max_history
+        // of 2 — exactly one row, the oldest (h1), must expire.
+        let outcome = store.upsert_record("text/plain", b"three", "h3", 2).unwrap();
+
+        assert_eq!(outcome.expired_hashes, vec!["h1".to_string()]);
+        assert_eq!(store.get_total_count(), 2);
+        assert!(store.get_row_content(id1).is_none());
+        assert!(store.get_row_content(id2).is_some());
+    }
+
+    #[test]
+    fn upsert_record_rotation_protects_pinned_rows_regardless_of_age() {
+        let mut store = test_store();
+        let id1 = store.upsert_record("text/plain", b"one", "h1", 100).unwrap().real_id;
+        set_timestamp(&mut store, "h1", 1000);
+        let id2 = store.upsert_record("text/plain", b"two", "h2", 100).unwrap().real_id;
+        set_timestamp(&mut store, "h2", 2000);
+        let id3 = store.upsert_record("text/plain", b"three", "h3", 100).unwrap().real_id;
+        set_timestamp(&mut store, "h3", 3000);
+
+        // Pin the objectively oldest row — it must survive purely because
+        // it's pinned, never merely because it happens to be recent.
+        assert!(store.set_pinned(id1, true).unwrap());
+
+        // max_history = 2: only 2 *unpinned* rows may survive. Before this
+        // call there are 2 unpinned rows (h2, h3); adding a third newer
+        // unpinned row means exactly one unpinned row — the oldest
+        // unpinned one, h2 — must expire. The pinned h1, despite being
+        // older than all of them, must not appear in `expired_hashes`.
+        let outcome = store.upsert_record("text/plain", b"four", "h4", 2).unwrap();
+
+        assert_eq!(outcome.expired_hashes, vec!["h2".to_string()]);
+        assert_eq!(store.get_total_count(), 3);
+        assert!(store.get_row_content(id1).is_some(), "pinned row must survive despite being the oldest");
+        assert!(store.get_row_content(id2).is_none(), "oldest *unpinned* row must be evicted");
+        assert!(store.get_row_content(id3).is_some());
+    }
+
+    #[test]
+    fn upsert_record_rotation_is_a_noop_when_within_capacity() {
+        let mut store = test_store();
+        store.upsert_record("text/plain", b"one", "h1", 100).unwrap();
+        let outcome = store.upsert_record("text/plain", b"two", "h2", 100).unwrap();
+
+        assert!(outcome.expired_hashes.is_empty());
+        assert_eq!(store.get_total_count(), 2);
+    }
+
+    // --- search_metadata / validate_keywords ---
+
+    #[test]
+    fn search_metadata_matches_preview_or_content_ordered_newest_first_with_absolute_index() {
+        let mut store = test_store();
+        let id1 = store.upsert_record("text/plain", b"alpha banana", "h1", 100).unwrap().real_id;
+        set_timestamp(&mut store, "h1", 1000);
+        store.upsert_record("text/plain", b"completely unrelated", "h2", 100).unwrap();
+        set_timestamp(&mut store, "h2", 2000);
+        let id3 = store.upsert_record("text/plain", b"banana split", "h3", 100).unwrap().real_id;
+        set_timestamp(&mut store, "h3", 3000);
+
+        let results = store.search_metadata(&["banana".to_string()], 10);
+        let ids: Vec<i64> = results.iter().map(|(_, row)| row.0).collect();
+        // Newest match first; the unrelated h2 row must not appear at all.
+        assert_eq!(ids, vec![id3, id1]);
+
+        let abs_indices: Vec<usize> = results.iter().map(|(idx, _)| *idx).collect();
+        // id3 is the newest row in the whole table (0 rows are newer).
+        // id1 has two strictly newer rows overall (id2 and id3).
+        assert_eq!(abs_indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn search_metadata_empty_result_for_unmatched_keyword() {
+        let mut store = test_store();
+        store.upsert_record("text/plain", b"hello world", "h1", 100).unwrap();
+
+        assert!(store.search_metadata(&["nonexistent".to_string()], 10).is_empty());
+    }
+
+    #[test]
+    fn validate_keywords_splits_present_and_absent_terms() {
+        let mut store = test_store();
+        store.upsert_record("text/plain", b"hello world", "h1", 100).unwrap();
+
+        let (valid, invalid) = store.validate_keywords(&["hello".to_string(), "nonexistent".to_string()]);
+        assert_eq!(valid, vec!["hello".to_string()]);
+        assert_eq!(invalid, vec!["nonexistent".to_string()]);
+    }
+
+    // --- delete_by_id / wipe ---
+
+    #[test]
+    fn delete_by_id_removes_the_row_and_returns_its_hash() {
+        let mut store = test_store();
+        let id = store.upsert_record("text/plain", b"to be deleted", "h-del", 100).unwrap().real_id;
+
+        let (deleted, hash) = store.delete_by_id(id).unwrap();
+        assert!(deleted);
+        assert_eq!(hash, Some("h-del".to_string()));
+        assert_eq!(store.get_total_count(), 0);
+    }
+
+    #[test]
+    fn delete_by_id_missing_id_returns_false_without_touching_other_rows() {
+        let mut store = test_store();
+        store.upsert_record("text/plain", b"untouched", "h-keep", 100).unwrap();
+
+        let (deleted, hash) = store.delete_by_id(999_999).unwrap();
+        assert!(!deleted);
+        assert_eq!(hash, None);
+        assert_eq!(store.get_total_count(), 1);
+    }
+
+    #[test]
+    fn wipe_clears_all_rows_including_pinned_ones() {
+        let mut store = test_store();
+        let id = store.upsert_record("text/plain", b"keep?", "h-wipe", 100).unwrap().real_id;
+        store.set_pinned(id, true).unwrap();
+
+        store.wipe().unwrap();
+        assert_eq!(store.get_total_count(), 0);
+    }
+
+    // --- set_pinned ---
+
+    #[test]
+    fn set_pinned_on_missing_id_returns_false() {
+        let mut store = test_store();
+        assert!(!store.set_pinned(999_999, true).unwrap());
+    }
+}
