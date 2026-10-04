@@ -117,3 +117,127 @@ impl SchemaManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn index_exists(conn: &Connection, name: &str) -> bool {
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1")
+            .and_then(|mut stmt| stmt.exists([name]))
+            .unwrap_or(false)
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        conn.prepare(&format!("SELECT 1 FROM pragma_table_info('{}') WHERE name = ?1", table))
+            .and_then(|mut stmt| stmt.exists([column]))
+            .unwrap_or(false)
+    }
+
+    // --- Fresh initialisation ---
+
+    #[test]
+    fn initialize_on_fresh_db_builds_v3_schema_with_is_pinned_column() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+
+        assert!(column_exists(&conn, "clipboard", "is_pinned"));
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn initialize_on_fresh_db_creates_idx_pinned_ts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+
+        assert!(index_exists(&conn, "idx_pinned_ts"));
+    }
+
+    #[test]
+    fn initialize_is_idempotent_when_rerun_on_an_already_migrated_db() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+        // A second run against an already-fully-migrated DB (the real
+        // startup path for every run after the first) must not error or
+        // regress the schema/version.
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(column_exists(&conn, "clipboard", "is_pinned"));
+    }
+
+    // --- Legacy migration ---
+
+    #[test]
+    fn migration_from_legacy_v1_db_adds_is_pinned_and_preserves_existing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // A pre-G-10 on-disk DB: the original v1 table shape, no
+        // `is_pinned` column, and `user_version` still at SQLite's own
+        // default of 0 (this migration machinery is what introduces
+        // `user_version` tracking in the first place).
+        conn.execute_batch(
+            "CREATE TABLE clipboard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                mime TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                preview TEXT,
+                content BLOB,
+                hash TEXT UNIQUE
+            );
+            INSERT INTO clipboard (timestamp, mime, size, preview, content, hash)
+            VALUES (1000, 'text/plain', 5, 'hello', 'hello', 'legacy-hash');",
+        )
+        .unwrap();
+
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+
+        assert!(column_exists(&conn, "clipboard", "is_pinned"));
+
+        let (mime, content, is_pinned): (String, String, i64) = conn
+            .query_row(
+                "SELECT mime, content, is_pinned FROM clipboard WHERE hash = 'legacy-hash'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(mime, "text/plain");
+        assert_eq!(content, "hello");
+        assert_eq!(is_pinned, 0, "pre-existing rows must backfill as unpinned");
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn initialize_self_heals_legacy_idx_pinned_into_idx_pinned_ts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // A DB that already reached v2 before `idx_pinned_ts` existed:
+        // `migrate_to_v2` already ran (so the version gate skips it again),
+        // but the index it's paired with is still the old single-column one.
+        conn.execute_batch(
+            "CREATE TABLE clipboard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                mime TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                preview TEXT,
+                content BLOB,
+                hash TEXT UNIQUE,
+                is_pinned INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX idx_pinned ON clipboard(is_pinned);
+            PRAGMA user_version = 2;",
+        )
+        .unwrap();
+
+        SchemaManager::initialize(&mut conn, 1000).unwrap();
+
+        assert!(!index_exists(&conn, "idx_pinned"), "stale single-column index must be dropped");
+        assert!(index_exists(&conn, "idx_pinned_ts"));
+    }
+}
