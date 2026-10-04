@@ -59,6 +59,11 @@ pub const SENSITIVE_MIME_HINTS: &[&str] = &[
 // --- Clipboard & Preview Settings ---
 pub const DEFAULT_MIME: &str = "text/plain;charset=utf-8";
 pub const PREVIEW_CHARS: usize = 100;
+
+// Substrings that mark a MIME as "text-like" for storage and search purposes.
+// Consumed by `core::utils::is_text_like_mime` and `storage::db::TEXT_MIME_SQL_PREDICATE`.
+pub const TEXT_LIKE_MIME_HINTS: &[&str] = &["text", "json", "xml", "xhtml", "utf8", "string", "uri-list"];
+
 pub const TEXT_MIME_ALTS: &[&str] = &[
     "text/plain;charset=utf-8",
     "text/plain",

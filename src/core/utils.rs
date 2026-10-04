@@ -134,10 +134,66 @@ pub fn is_rtf_mime(mime: &str) -> bool {
     base.eq_ignore_ascii_case("text/rtf") || base.eq_ignore_ascii_case("application/rtf")
 }
 
+/// True when `mime` represents a text-like payload (plain text, rich markup,
+/// JSON, XML, URI lists, or legacy string atoms) eligible for preview generation,
+/// inline text storage, and full-text search indexing.
+///
+/// Binary media (images, audio, video) are explicitly excluded, ensuring types like
+/// `image/svg+xml` are not treated as text-like payloads.
+pub fn is_text_like_mime(mime: &str) -> bool {
+    let base = mime_base(mime);
+    if starts_with_ignore_ascii_case(base, "image/")
+        || starts_with_ignore_ascii_case(base, "audio/")
+        || starts_with_ignore_ascii_case(base, "video/")
+    {
+        return false;
+    }
+
+    let base_bytes = base.as_bytes();
+    crate::core::constants::TEXT_LIKE_MIME_HINTS.iter().any(|&hint| {
+        let hint_bytes = hint.as_bytes();
+        base_bytes.len() >= hint_bytes.len()
+            && base_bytes.windows(hint_bytes.len()).any(|w| w.eq_ignore_ascii_case(hint_bytes))
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_text_like_mime_identifies_text_markup_and_data_formats() {
+        assert!(is_text_like_mime("text/plain"));
+        assert!(is_text_like_mime("text/plain; charset=utf-8"));
+        assert!(is_text_like_mime("TEXT/PLAIN"));
+        assert!(is_text_like_mime("text/html"));
+        assert!(is_text_like_mime("text/markdown"));
+        assert!(is_text_like_mime("text/uri-list"));
+        assert!(is_text_like_mime("application/json"));
+        assert!(is_text_like_mime("application/ld+json"));
+        assert!(is_text_like_mime("application/xml"));
+        assert!(is_text_like_mime("application/xhtml+xml"));
+        assert!(is_text_like_mime("application/atom+xml"));
+        assert!(is_text_like_mime("UTF8_STRING"));
+        assert!(is_text_like_mime("utf8_string"));
+        assert!(is_text_like_mime("STRING"));
+        assert!(is_text_like_mime("TEXT"));
+        assert!(is_text_like_mime("compound_text"));
+        assert!(is_text_like_mime("application/x-uri-list"));
+    }
+
+    #[test]
+    fn is_text_like_mime_rejects_binary_media_and_non_text_types() {
+        assert!(!is_text_like_mime("image/png"));
+        assert!(!is_text_like_mime("image/jpeg"));
+        assert!(!is_text_like_mime("image/svg+xml"));
+        assert!(!is_text_like_mime("audio/mpeg"));
+        assert!(!is_text_like_mime("video/mp4"));
+        assert!(!is_text_like_mime("application/octet-stream"));
+        assert!(!is_text_like_mime("application/pdf"));
+        assert!(!is_text_like_mime("application/zip"));
+    }
 
     #[test]
     fn strip_html_tags_basic() {
