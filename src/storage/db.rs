@@ -530,6 +530,122 @@ mod tests {
         assert_eq!(invalid, vec!["nonexistent".to_string()]);
     }
 
+    #[test]
+    fn search_metadata_finds_json_payload() {
+        let mut store = test_store();
+        store.upsert_record("application/json", br#"{"needle": "found"}"#, "h-json", 100).unwrap();
+
+        let results = store.search_metadata(&["needle".to_string()], 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.2, "application/json");
+    }
+
+    #[test]
+    fn search_metadata_finds_xhtml_payload() {
+        let mut store = test_store();
+        store.upsert_record(
+            "application/xhtml+xml",
+            b"<html><body>findable xhtml content</body></html>",
+            "h-xhtml",
+            100,
+        ).unwrap();
+
+        let results = store.search_metadata(&["findable".to_string()], 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.2, "application/xhtml+xml");
+    }
+
+    #[test]
+    fn search_metadata_finds_xml_payload() {
+        let mut store = test_store();
+        store.upsert_record("application/xml", b"<note><to>findable_recipient</to></note>", "h-xml", 100).unwrap();
+
+        let results = store.search_metadata(&["findable_recipient".to_string()], 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.2, "application/xml");
+    }
+
+    #[test]
+    fn search_metadata_finds_uri_list_payload() {
+        let mime = crate::core::constants::MIME_URI_LIST;
+        let mut store = test_store();
+        store.upsert_record(mime, b"/home/user/findable-report.pdf", "h-uri", 100).unwrap();
+
+        let results = store.search_metadata(&["findable-report".to_string()], 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.2, mime);
+    }
+
+    #[test]
+    fn search_metadata_finds_utf8_string_payload() {
+        let mut store = test_store();
+        store.upsert_record("UTF8_STRING", b"findable utf8 selection", "h-utf8", 100).unwrap();
+
+        let results = store.search_metadata(&["findable".to_string()], 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.2, "UTF8_STRING");
+    }
+
+    #[test]
+    fn search_metadata_finds_mime_with_charset_parameter() {
+        let mut store = test_store();
+        store.upsert_record("text/plain;charset=utf-8", b"findable charset payload", "h-charset", 100).unwrap();
+
+        let results = store.search_metadata(&["findable".to_string()], 10);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_metadata_does_not_match_image_payload_even_with_matching_bytes() {
+        let mut store = test_store();
+        store.upsert_record("image/png", b"needle-like-bytes-in-an-image", "h-img", 100).unwrap();
+        store.upsert_record("image/svg+xml", b"<svg>needle-like-bytes-in-svg</svg>", "h-svg", 100).unwrap();
+
+        assert!(store.search_metadata(&["needle".to_string()], 10).is_empty());
+    }
+
+    #[test]
+    fn search_metadata_does_not_match_generic_binary_payload() {
+        let mut store = test_store();
+        store.upsert_record("application/octet-stream", b"needle-in-binary", "h-bin", 100).unwrap();
+
+        assert!(store.search_metadata(&["needle".to_string()], 10).is_empty());
+    }
+
+    #[test]
+    fn search_metadata_mixed_mimes_only_text_like_ones_are_in_scope() {
+        let mut store = test_store();
+        store.upsert_record("application/json", br#"{"k": "shared-term"}"#, "h-json", 100).unwrap();
+        store.upsert_record("image/jpeg", b"shared-term as raw jpeg bytes", "h-jpeg", 100).unwrap();
+        store.upsert_record("application/octet-stream", b"shared-term as raw binary", "h-bin", 100).unwrap();
+        store.upsert_record("text/plain", b"shared-term as plain text", "h-txt", 100).unwrap();
+
+        let results = store.search_metadata(&["shared-term".to_string()], 10);
+        let mimes: std::collections::HashSet<String> = results.iter().map(|(_, row)| row.2.clone()).collect();
+        assert_eq!(mimes, std::collections::HashSet::from(["application/json".to_string(), "text/plain".to_string()]));
+    }
+
+    #[test]
+    fn validate_keywords_recognises_json_and_xhtml_terms() {
+        let mut store = test_store();
+        store.upsert_record("application/json", br#"{"term": "jsonterm"}"#, "h-json", 100).unwrap();
+        store.upsert_record("application/xhtml+xml", b"<p>xhtmlterm</p>", "h-xhtml", 100).unwrap();
+
+        let (valid, invalid) = store.validate_keywords(&["jsonterm".to_string(), "xhtmlterm".to_string()]);
+        assert_eq!(valid, vec!["jsonterm".to_string(), "xhtmlterm".to_string()]);
+        assert!(invalid.is_empty());
+    }
+
+    #[test]
+    fn validate_keywords_rejects_term_only_present_in_an_image_payload() {
+        let mut store = test_store();
+        store.upsert_record("image/png", b"only-in-image-bytes", "h-img", 100).unwrap();
+
+        let (valid, invalid) = store.validate_keywords(&["only-in-image-bytes".to_string()]);
+        assert!(valid.is_empty());
+        assert_eq!(invalid, vec!["only-in-image-bytes".to_string()]);
+    }
+
     // --- delete_by_id / wipe ---
 
     #[test]
