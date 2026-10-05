@@ -42,16 +42,27 @@ One tradeoff this buys: no locking between "Wayland event" and "IPC command" han
 
 Turning a compositor's pipe into a stored record is three distinct decisions — how much to read, how to interpret it, and when to fingerprint it — and `y4p` keeps them in that fixed order rather than interleaving them.
 
-First, the whole payload is read in one bounded call:
+First, the whole payload is read in one bounded call, `read_bounded_payload`, capped by `MAX_PAYLOAD_BYTES` (256MiB, `src/core/constants.rs`):
 
 ```rust
-// src/wayland/handlers/data_control/device.rs — ingest_and_send
-let mut payload = Vec::new();
-let mut reader = read_file.take(268435456); // 256MiB ceiling
-if reader.read_to_end(&mut payload).is_err() || payload.is_empty() { return; }
+// src/wayland/handlers/data_control/device.rs
+fn read_bounded_payload<R: Read>(reader: R, limit: u64) -> Option<Vec<u8>> {
+    let mut payload = Vec::new();
+    let mut bounded = reader.take(limit + 1); // one probe byte beyond the cap
+    if bounded.read_to_end(&mut payload).is_err() { return None; }
+    if payload.is_empty() || payload.len() as u64 > limit { return None; }
+    Some(payload)
+}
+
+// ingest_and_send, and Action Mode's synchronous read
+let Some(payload) = read_bounded_payload(read_file, MAX_PAYLOAD_BYTES) else { return; };
 ```
 
-`Read::take` caps the transfer at 256MiB regardless of what the sender offers to write — a misbehaving clipboard source can't turn one ingestion into an unbounded allocation. `read_to_end` is the standard library's own fully-buffered read; there's no bespoke chunk loop or page-aligned buffer to maintain here, because nothing on this path needs one — ingestion already runs off the daemon's main `poll` loop entirely, on its own per-selection spawned thread (see above), so a straightforward buffered read costs nothing the design cares about.
+The cap means a misbehaving clipboard source can't turn one ingestion into an unbounded allocation. The `limit + 1` is the subtle part. `Read::take` stops *silently* at its cap: no error, no flag, just a clean `Ok(_)`. If the reader were capped at exactly `limit`, a stream that is truly larger would be cut off mid-transfer and look identical to one that happened to be exactly `limit` bytes long. The truncated bytes would then be hashed and persisted as if they were the whole clipboard entry: silent corruption, and a corrupt entry that restores "successfully".
+
+Reading one extra byte removes the ambiguity. If more than `limit` bytes come back, the stream was oversized, so the whole payload is discarded (`None`) rather than kept as a partial. A stream of exactly `limit` bytes still passes. An I/O error or an empty read also yields `None`, so every failure mode ends the same way: nothing is stored.
+
+`read_to_end` is the standard library's own fully-buffered read; there's no bespoke chunk loop or page-aligned buffer to maintain here, because nothing on this path needs one — ingestion already runs off the daemon's main `poll` loop entirely, on its own per-selection spawned thread (see above), so a straightforward buffered read costs nothing the design cares about.
 
 Second, the buffered payload is normalised, and — where the offered label can't be trusted outright — re-identified from its own bytes. `normalise_payload` re-detects images by their magic bytes (`core::utils::detect_image_mime`) and rewrites `text/uri-list` payloads into plain, percent-decoded paths (`core::utils::normalize_uri_list`):
 

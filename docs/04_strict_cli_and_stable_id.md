@@ -23,9 +23,13 @@ The MRU position — what you see without `--id` — and the stable ID — what 
 SELECT (SELECT COUNT(*) FROM clipboard c2 WHERE c2.timestamp > c1.timestamp) AS abs_idx,
        id, timestamp, mime, size, preview, is_pinned
 FROM clipboard c1
-WHERE (mime LIKE '%text%' OR mime LIKE '%UTF8%') AND (preview LIKE ? OR content LIKE ?)
-ORDER BY timestamp DESC
+WHERE (mime NOT LIKE 'image/%' AND (mime LIKE '%text%' OR mime LIKE '%utf8%' OR mime LIKE '%json%'
+        OR mime LIKE '%xml%' OR mime LIKE '%uri-list%' OR mime LIKE '%string%'))   -- TEXT_MIME_SQL_PREDICATE
+  AND (preview LIKE ?1 OR content LIKE ?1)   -- repeated per keyword, joined with AND
+ORDER BY timestamp DESC LIMIT ?
 ```
+
+The `mime` line is not hand-written in `search_metadata`: it is the shared `TEXT_MIME_SQL_PREDICATE` constant, derived from `TEXT_LIKE_MIME_HINTS` and also used by `validate_keywords` and `migrate_to_v3`, so `search`, keyword validation and the on-disk `TEXT` storage class always agree on what counts as text (see [02](02_hybrid_storage_and_pin.md)).
 
 `search`'s bugfix history is the concrete case this mattered for.
 
