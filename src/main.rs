@@ -54,8 +54,9 @@ fn main() {
     // Isolation Scope covers core/storage/wayland/daemon, not this
     // entry point): a process that can't install its own signal handler
     // has nothing safe left to fall back to, so failing fast here is correct.
-    #[allow(clippy::expect_used)]
-    ctrlc::set_handler(move || {
+    // The failure is reported and turned into a plain exit code 1 rather than
+    // a panic, keeping the non-test crate free of `expect()`/`unwrap()`.
+    if let Err(e) = ctrlc::set_handler(move || {
         if crate::core::is_exiting() {
             // Second Ctrl+C: force-exit immediately regardless of role.
             std::process::exit(1);
@@ -67,7 +68,10 @@ fn main() {
             // process, if any, is left completely untouched.
             std::process::exit(130);
         }
-    }).expect("failed to set signal handler");
+    }) {
+        eprintln!("{}failed to set signal handler: {}", LOG_ERROR, e);
+        std::process::exit(1);
+    }
 
     // Robustness: handle database open errors without panicking.
     let db = match storage::ClipboardDb::open() {
