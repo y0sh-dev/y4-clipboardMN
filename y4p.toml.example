@@ -13,8 +13,8 @@
 # When the threshold is exceeded, the oldest unpinned entries are pruned.
 # Pinned records are permanently exempt from rotation.
 # Can be overridden by the Y4P_MAX_HISTORY environment variable.
-# Default: 100
-max_history = 100
+# Default: 256
+max_history = 256
 
 [mime]
 # Drop Rich Text Format (text/rtf, application/rtf) offers at ingress when

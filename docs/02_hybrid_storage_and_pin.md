@@ -72,7 +72,7 @@ Re-running a migration that already applied is a safe no-op, not an error. And a
 
 This is the mechanism that made Pin protection possible to ship without a data-migration story of its own. `migrate_to_v2` adds `is_pinned INTEGER NOT NULL DEFAULT 0` to the existing `clipboard` table. Every row that existed before that version simply becomes "unpinned." No row gets rewritten. No row gets dropped. No row gets reinterpreted.
 
-`migrate_to_v3` — the newest one — leans on the exact same guarantee for a very different kind of change: moving textual content from `BLOB` storage class to `TEXT` (the next section explains why that move matters). It runs one `UPDATE ... SET content = CAST(content AS TEXT)`, scoped to rows whose `mime` already looks textual. `CAST` on a value that's already the target storage class just relabels it — the bytes on disk don't change, so this is a metadata-only backfill, not a rewrite of anyone's clipboard history. A user upgrading from a v0.2.0 database gets the new, faster storage class for their existing rows automatically, the first time the new binary opens their database — no export/import step, no "your history was reset" surprise.
+`migrate_to_v3` — the newest one — leans on the exact same guarantee for a very different kind of change: moving textual content from `BLOB` storage class to `TEXT` (the next section explains why that move matters). It runs one `UPDATE ... SET content = CAST(content AS TEXT)`, scoped to rows matching `TEXT_MIME_SQL_PREDICATE` — the same textual-MIME definition `upsert_record` and `search` use (see below). `CAST` on a value that's already the target storage class just relabels it — the bytes on disk don't change, so this is a metadata-only backfill, not a rewrite of anyone's clipboard history. A user upgrading from a v0.2.0 database gets the new, faster storage class for their existing rows automatically, the first time the new binary opens their database — no export/import step, no "your history was reset" surprise.
 
 ---
 
@@ -158,7 +158,7 @@ That uniformity was convenient for the schema, and costly for search. SQLite's `
 
 For a screenshot that never gets searched, that cost never mattered — the mime filter excludes it long before the `CAST` would run. For a text snippet, which is exactly the kind of thing `search` exists to find, it meant paying an encoding-detection tax on content that was textual from the moment it was copied.
 
-The fix removes the guesswork instead of speeding it up. At insert time, `upsert_record` already knows the mime type. If it looks textual (`text/*`, `*uri-list*`, `*json*`, `text/html`, `*xhtml*`) and the bytes genuinely decode as valid UTF-8, the row is inserted with `content` bound as a Rust `&str` rather than `&[u8]` — which hands SQLite a value that adopts `TEXT` storage class directly, no cast required on the way in, and none required on the way back out.
+The fix removes the guesswork instead of speeding it up. At insert time, `upsert_record` already knows the mime type. If it looks textual (`is_text_like_mime`, see below) and the bytes genuinely decode as valid UTF-8, the row is inserted with `content` bound as a Rust `&str` rather than `&[u8]` — which hands SQLite a value that adopts `TEXT` storage class directly, no cast required on the way in, and none required on the way back out.
 
 ```text
    Before                                  After
@@ -170,5 +170,16 @@ The fix removes the guesswork instead of speeding it up. At insert time, `upsert
         |         LIKE '%foo%'                  |          (no cast — already
         +-------> (cast on every candidate)     +--------> comparable as-is)
 ```
+
+### One definition of "textual", shared by every code path
+
+Four places have to agree on which MIME types count as text: `upsert_record` (TEXT vs BLOB at insert time), `search_metadata` and `validate_keywords` (which rows `search` may match) and `migrate_to_v3` (which legacy rows to backfill). If any one of them used a narrower or wider rule than the others, the failure would be silent: a row stored as `BLOB` that `search` still tries to `LIKE`-match, or a row `search` skips even though it was stored as perfectly searchable text. Earlier versions did drift this way: `application/json` and `application/xhtml+xml` fell out of search because the SQL filter only knew `%text%` and `%UTF8%`.
+
+There is now a single source of truth, `TEXT_LIKE_MIME_HINTS` (`src/core/constants.rs`): `text`, `json`, `xml`, `xhtml`, `utf8`, `string` and `uri-list`. It is consumed in two forms that are kept in step:
+
+- `core::utils::is_text_like_mime` applies the hints as case-insensitive substring tests in Rust. Parameters such as `; charset=utf-8` are ignored, and `image/*`, `audio/*` and `video/*` are rejected first, so `image/svg+xml` never counts as text despite containing `xml`. `upsert_record` calls this.
+- `TEXT_MIME_SQL_PREDICATE` (`src/storage/db.rs`) is the equivalent SQL fragment: `mime NOT LIKE 'image/%'` AND any of the hints as `mime LIKE '%hint%'`. `search_metadata`, `validate_keywords` and `migrate_to_v3` all interpolate this one constant instead of carrying their own `WHERE` clause.
+
+Images are excluded on both sides for a structural reason, not just a semantic one: their payloads are offloaded to `FileCache` and stored with `content = NULL`, so there is nothing for `content LIKE ?` to match.
 
 Bytes that merely *claim* a textual mime but fail UTF-8 validation still fall back to ordinary `BLOB` storage — nothing about this optimization risks corrupting or misrepresenting content that isn't actually text. And because SQLite's column *type affinity* doesn't force a single storage class per column, `TEXT` and `BLOB` rows coexist in the same `content` column without any change to the table's `CREATE TABLE` definition — `migrate_to_v3` only had to backfill existing rows, never alter the schema itself.

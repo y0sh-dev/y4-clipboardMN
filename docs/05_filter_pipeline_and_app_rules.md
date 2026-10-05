@@ -82,7 +82,7 @@ History limits and MIME-handling behaviour resolve through a deterministic hiera
  2. User Configuration File ($XDG_CONFIG_HOME/y4p/y4p.toml)
                          |
                          v
- 3. Hard-Coded Built-In Defaults (DEFAULT_MAX_HISTORY = 100, drop_rtf = true, etc.)
+ 3. Hard-Coded Built-In Defaults (DEFAULT_MAX_HISTORY = 256, drop_rtf = true, etc.)
 ```
 
 This ensures full operational capability in minimal containerised environments where no configuration file exists, while granting desktop users control over history retention and MIME handling.

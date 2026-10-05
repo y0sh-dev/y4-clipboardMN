@@ -45,11 +45,13 @@ This document complements the global protocol (`~/.claude/CLAUDE.md`) and define
 ## 2. Release Cadence & Documentation Cadence
 
 1. **Version Lifecycle**:
-   - **`.N.1` - `.N.3` + `.N.5`**: Feature additions, specification completion, and bug fixes.
-   - **`.N.4` + `.N.6` - `.N.9`**: Optimisation, refactoring, security hardening, and code/documentation synchronization.
-   - (If slots are exhausted, increment to `.N.10` etc. May be skipped if major upgrade prep completes early at `.N.6`.)
+   - **`.N.1` - `.N.4`**: Feature additions, specification completion, and bug fixes.
+   - **`.N.5` - `.N.8`**: Refactoring, optimisation, and security hardening.
+   - **`.N.9`**: Documentation distillation, code synchronisation, and protocol alignment.
+   - **`.N.0`**: Official Release Fixed. Releases occur only on major values; intermediate minor versions do not receive public releases.
+   - **Fast-Track to Release Exception**: when minor slots remain but the planned tasks are completed, jump directly to `.(N+1).0`, prioritising verification.
 2. **Documentation Alignment Timing**:
-   - Conducted strictly at **`.N.9` or the highest minor version preceding a major upgrade**.
+   - Conducted strictly at **`.N.9` or pre-release** (the last minor version before a major upgrade, including a Fast-Track jump).
    - Ensures systematic architectural documentation distillation before every major release.
 3. **Two-Stage Documentation & Code Comments**:
    - **Active Development**: Detailed architectural and "Why" comments within code are encouraged.
@@ -87,5 +89,8 @@ Both checks must pass with zero errors and zero warnings before presenting work 
    - Summary of changes made in the latest iteration
    - Verification status (`check.sh` result)
    - Next immediate action
-5. **Staggered Cleanup Lifecycle**:
+5. **Cross-Trialspace Status Inspection (Read-Only)**:
+   - When collaborating or resuming after a session transition, you are permitted and encouraged to inspect Gemini's status file (`/home/yukkkk1/Documents/Projects/Trialspace/GEMINI/{Project_name}/status.md`) in **read-only mode** to understand recent context, test results, and peer handoffs.
+   - Do NOT create, modify, or delete files in Gemini's Trialspace.
+6. **Staggered Cleanup Lifecycle**:
    - Do NOT clear context at the same time as AGY (Gemini). Ensure the latest state is captured in `status.md` before executing `/clear`.
