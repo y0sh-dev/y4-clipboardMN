@@ -22,6 +22,7 @@ mod core;
 mod storage;
 mod wayland;
 mod daemon;
+mod image;
 mod cli;
 
 use std::io::Write;

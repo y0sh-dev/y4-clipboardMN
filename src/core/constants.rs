@@ -42,6 +42,18 @@ pub const SOCKET_FILE_NAME: &str = "y4p.sock";
 // and persisted as corrupt data.
 pub const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
+// --- Local Image Pipeline ---
+// External converter executable, resolved through `PATH` (ImageMagick 7).
+pub const MAGICK_PROGRAM: &str = "magick";
+// Chunk size for relaying bytes between caller streams and a child's pipes.
+// Matches the default Linux pipe capacity (64KiB) so one read/write pair
+// moves at most one full pipe buffer.
+pub const PIPELINE_CHUNK_BYTES: usize = 64 * 1024;
+// Upper bound on the child's stderr text retained for error reporting. The
+// stream is always drained to EOF regardless, so a chatty child can never
+// block on a full stderr pipe; only the retained excerpt is capped.
+pub const PIPELINE_STDERR_CAP_BYTES: usize = 8 * 1024;
+
 // --- Security & Privacy Configuration ---
 // Clipboard security: MIME types to exclude from persistent storage
 pub const SENSITIVE_MIME_HINTS: &[&str] = &[
