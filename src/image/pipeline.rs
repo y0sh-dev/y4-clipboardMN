@@ -29,11 +29,11 @@ pub enum PipelineError {
 }
 
 impl PipelineError {
-    /// True when the tool itself is absent or unusable, as opposed to having
-    /// run and rejected its input — the caller's cue to fall back rather
-    /// than report a failed conversion.
+    /// True when the tool itself could not be spawned (absent, wrong architecture,
+    /// invalid binary format, permission denied, or OS spawn failure) — the caller's
+    /// cue to fall back to raw persistence rather than treating it as input rejection.
     pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Spawn(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied))
+        matches!(self, Self::Spawn(_))
     }
 }
 
@@ -480,5 +480,19 @@ mod tests {
         let signalled = PipelineError::Failed { code: None, stderr: "bad".into() }.to_string();
         assert!(coded.contains("status 2"));
         assert!(signalled.contains("signal"));
+    }
+
+    #[test]
+    fn is_unavailable_returns_true_for_all_spawn_error_kinds() {
+        assert!(PipelineError::Spawn(io::Error::new(io::ErrorKind::NotFound, "not found")).is_unavailable());
+        assert!(PipelineError::Spawn(io::Error::new(io::ErrorKind::PermissionDenied, "denied")).is_unavailable());
+        assert!(PipelineError::Spawn(io::Error::new(io::ErrorKind::InvalidData, "exec format error")).is_unavailable());
+        assert!(PipelineError::Spawn(io::Error::other("dynamic linker fault")).is_unavailable());
+
+        // Non-spawn failures must NOT be reported as unavailable
+        assert!(!PipelineError::Source(io::Error::other("read error")).is_unavailable());
+        assert!(!PipelineError::Sink(io::Error::other("write error")).is_unavailable());
+        assert!(!PipelineError::Child(io::Error::other("pipe broken")).is_unavailable());
+        assert!(!PipelineError::Failed { code: Some(1), stderr: "syntax error".into() }.is_unavailable());
     }
 }
