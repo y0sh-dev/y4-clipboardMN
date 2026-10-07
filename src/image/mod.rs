@@ -9,13 +9,13 @@
 //! Layering: depends only on `std` and `core`; nothing here knows about
 //! SQLite, Wayland or the daemon, so any layer may adopt it later.
 
-// Milestones v0.5.1-v0.5.2 land the I/O boundary and the transcoder on
-// their own; their consumers (conversion on ingest/egress) arrive in later
-// v0.5.x milestones. Until then the public surface is exercised by the
-// unit tests only, so `dead_code` is allowed module-wide rather than
-// sprinkled per item.
+// Only ingestion (`route::route_for_ingest`) consumes this module so far;
+// parts of the public surface (e.g. PNG output, egress-side conversion) are
+// exercised by the unit tests only until later v0.5.x milestones adopt them,
+// so `dead_code` is allowed module-wide rather than sprinkled per item.
 #![allow(dead_code)]
 
 pub mod magick;
 pub mod pipeline;
+pub mod route;
 pub mod transcode;
