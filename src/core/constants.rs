@@ -72,6 +72,12 @@ pub const IMAGE_QUALITY_MIN: u8 = 1;
 pub const IMAGE_QUALITY_MAX: u8 = 100;
 pub const IMAGE_QUALITY_DEFAULT: u8 = 80;
 
+// Lossy WebP quality used when ingestion re-encodes a JPEG to strip its
+// metadata. JPEG is already lossy, so a lossless WebP would only inflate it;
+// 90 keeps the extra generation loss visually negligible while still
+// shrinking the payload.
+pub const IMAGE_INGEST_JPEG_QUALITY: u8 = 90;
+
 // --- Security & Privacy Configuration ---
 // Clipboard security: MIME types to exclude from persistent storage
 pub const SENSITIVE_MIME_HINTS: &[&str] = &[
@@ -201,6 +207,9 @@ pub const MSG_DAEMON_START_FAILED: &str = "daemon failed to start (see error abo
 pub const MSG_WAYLAND_CONN_FAIL: &str = "failed to connect to wayland compositor. is DISPLAY/WAYLAND_DISPLAY set?";
 pub const MSG_MONITOR_PAUSED:  &str = "clipboard monitoring paused.";
 pub const MSG_MONITOR_RESUMED: &str = "clipboard monitoring resumed.";
+// Shown once per process when an image arrives but `magick` is unusable:
+// the image is still saved, but unmodified, i.e. with its metadata intact.
+pub const MSG_IMAGE_TOOL_MISSING: &str = "`magick` (ImageMagick) is unavailable; images are saved unmodified, metadata included.";
 
 pub fn log_save(mime: &str, size: usize) -> String {
     format!("{}saved: {} ({} bytes)", LOG_INFO, mime, size)
