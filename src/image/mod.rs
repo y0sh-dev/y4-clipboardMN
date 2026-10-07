@@ -9,11 +9,13 @@
 //! Layering: depends only on `std` and `core`; nothing here knows about
 //! SQLite, Wayland or the daemon, so any layer may adopt it later.
 
-// Milestone v0.5.1 lands the I/O boundary on its own; its consumers
-// (conversion on ingest/egress) arrive in later v0.5.x milestones. Until
-// then the public surface is exercised by the unit tests only, so
-// `dead_code` is allowed module-wide rather than sprinkled per item.
+// Milestones v0.5.1-v0.5.2 land the I/O boundary and the transcoder on
+// their own; their consumers (conversion on ingest/egress) arrive in later
+// v0.5.x milestones. Until then the public surface is exercised by the
+// unit tests only, so `dead_code` is allowed module-wide rather than
+// sprinkled per item.
 #![allow(dead_code)]
 
 pub mod magick;
 pub mod pipeline;
+pub mod transcode;
