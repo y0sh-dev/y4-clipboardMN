@@ -54,6 +54,24 @@ pub const PIPELINE_CHUNK_BYTES: usize = 64 * 1024;
 // block on a full stderr pipe; only the retained excerpt is capped.
 pub const PIPELINE_STDERR_CAP_BYTES: usize = 8 * 1024;
 
+// Resource ceilings handed to ImageMagick (`-limit`) when it decodes an
+// untrusted clipboard image, so a small file that expands enormously (a
+// decompression bomb) is rejected or spilled within bounds instead of
+// exhausting memory. Width/height are pixels; 16384 comfortably covers an
+// 8K screenshot (7680x4320). Memory/map/disk are ImageMagick size strings;
+// time is seconds of CPU before the child aborts itself.
+pub const IMAGE_LIMIT_WIDTH_PX: &str = "16384";
+pub const IMAGE_LIMIT_HEIGHT_PX: &str = "16384";
+pub const IMAGE_LIMIT_MEMORY: &str = "256MiB";
+pub const IMAGE_LIMIT_MAP: &str = "512MiB";
+pub const IMAGE_LIMIT_DISK: &str = "1GiB";
+pub const IMAGE_LIMIT_TIME_SECS: &str = "30";
+// Encoder quality bounds (inclusive) and the default used when a caller has
+// no preference. Out-of-range requests are clamped, never rejected.
+pub const IMAGE_QUALITY_MIN: u8 = 1;
+pub const IMAGE_QUALITY_MAX: u8 = 100;
+pub const IMAGE_QUALITY_DEFAULT: u8 = 80;
+
 // --- Security & Privacy Configuration ---
 // Clipboard security: MIME types to exclude from persistent storage
 pub const SENSITIVE_MIME_HINTS: &[&str] = &[
