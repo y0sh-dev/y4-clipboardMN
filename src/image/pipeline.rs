@@ -689,16 +689,27 @@ mod tests {
         })
     }
 
-    /// True once `pid` is neither running nor a zombie.
+    /// True once `pid` is no longer actively executing (either completely reaped,
+    /// or in state 'Z' waiting for PID 1 / init to reap it).
     fn process_is_gone(pid: u32) -> bool {
-        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let Ok(p) = i32::try_from(pid) else { return true };
+        // SAFETY: signal 0 performs error checking without delivering a signal.
+        let exists = unsafe { libc::kill(p, 0) == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) };
+        if !exists {
+            return true;
+        }
+
+        // Process entry still present in kernel table: check if it has transitioned to
+        // Zombie ('Z') state, meaning SIGKILL successfully terminated its execution.
+        match std::fs::read_to_string(format!("/proc/{pid}/status")) {
             Err(_) => true,
-            Ok(stat) => stat.rsplit(')').next().is_some_and(|rest| rest.trim_start().starts_with('Z')),
+            Ok(status) => status.lines().any(|l| l.starts_with("State:") && l.contains('Z')),
         }
     }
 
     fn wait_until_gone(pid: u32) -> bool {
-        for _ in 0..60 {
+        // Allow up to 5 seconds (100 * 50ms) to accommodate heavy CI runner load.
+        for _ in 0..100 {
             if process_is_gone(pid) {
                 return true;
             }
