@@ -15,6 +15,7 @@
 // so `dead_code` is allowed module-wide rather than sprinkled per item.
 #![allow(dead_code)]
 
+pub mod breaker;
 pub mod magick;
 pub mod pipeline;
 pub mod route;

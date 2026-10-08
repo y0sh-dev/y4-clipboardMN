@@ -72,6 +72,18 @@ pub const IMAGE_QUALITY_MIN: u8 = 1;
 pub const IMAGE_QUALITY_MAX: u8 = 100;
 pub const IMAGE_QUALITY_DEFAULT: u8 = 80;
 
+// Wall-clock budget for one image transcode. Unlike `IMAGE_LIMIT_TIME_SECS`
+// (ImageMagick's own CPU-time limit, which a blocked or deadlocked process
+// never reaches), this is enforced from outside: the child's whole process
+// group is SIGKILLed when it elapses.
+pub const IMAGE_TRANSCODE_TIMEOUT_SECS: u64 = 15;
+// Circuit breaker around image conversion: this many consecutive failures
+// suspend conversion (images are stored unmodified, no process is spawned)
+// for the cooldown, after which a single canary conversion decides whether
+// to resume.
+pub const IMAGE_BREAKER_THRESHOLD: u32 = 3;
+pub const IMAGE_BREAKER_COOLDOWN_SECS: u64 = 30;
+
 // Lossy WebP quality used when ingestion re-encodes a JPEG to strip its
 // metadata. JPEG is already lossy, so a lossless WebP would only inflate it;
 // 90 keeps the extra generation loss visually negligible while still
@@ -210,6 +222,14 @@ pub const MSG_MONITOR_RESUMED: &str = "clipboard monitoring resumed.";
 // Shown once per process when an image arrives but `magick` is unusable:
 // the image is still saved, but unmodified, i.e. with its metadata intact.
 pub const MSG_IMAGE_TOOL_MISSING: &str = "`magick` (ImageMagick) is unavailable; images are saved unmodified, metadata included.";
+
+pub fn log_image_breaker_open(failures: u32, cooldown_secs: u64) -> String {
+    format!("{}image conversion failed {} times in a row; suspended for {}s (images are saved unmodified)", LOG_WARN, failures, cooldown_secs)
+}
+
+pub fn log_image_breaker_closed() -> String {
+    format!("{}image conversion recovered; resumed", LOG_INFO)
+}
 
 pub fn log_save(mime: &str, size: usize) -> String {
     format!("{}saved: {} ({} bytes)", LOG_INFO, mime, size)

@@ -5,8 +5,11 @@
 
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
+use std::time::Duration;
 
 use crate::core::constants::{PIPELINE_CHUNK_BYTES, PIPELINE_STDERR_CAP_BYTES};
 
@@ -26,6 +29,9 @@ pub enum PipelineError {
     /// The child ran but exited unsuccessfully (non-zero code, or killed by
     /// a signal when `code` is `None`). `stderr` is a capped excerpt.
     Failed { code: Option<i32>, stderr: String },
+    /// The child outlived its wall-clock budget and was killed (together
+    /// with any processes it had spawned). Carries the budget that was exceeded.
+    Timeout(Duration),
 }
 
 impl PipelineError {
@@ -46,6 +52,7 @@ impl fmt::Display for PipelineError {
             Self::Child(e) => write!(f, "pipe I/O with external process failed: {e}"),
             Self::Failed { code: Some(code), stderr } => write!(f, "external process exited with status {code}: {stderr}"),
             Self::Failed { code: None, stderr } => write!(f, "external process was terminated by a signal: {stderr}"),
+            Self::Timeout(limit) => write!(f, "external process exceeded its {}s time limit and was killed", limit.as_secs_f64()),
         }
     }
 }
@@ -132,11 +139,107 @@ fn drain_capped<R: Read>(mut from: R, cap: usize) -> Vec<u8> {
     kept
 }
 
+/// SIGKILLs the child's whole process group. The child is started as the
+/// leader of its own group (`process_group(0)`, so its pgid is its pid),
+/// which makes this reach any helper processes it spawned too. That matters
+/// beyond tidiness: a surviving grandchild would keep the stdout/stderr
+/// pipes open, so the reader threads would never see EOF and the pipeline
+/// would still hang after the "kill".
+///
+/// Callers must only use this while the child has not been reaped (see
+/// `Watchdog`): until then the pid is reserved by the kernel and cannot name
+/// an unrelated process.
+fn kill_process_group(pid: u32) {
+    let Ok(pgid) = i32::try_from(pid) else { return };
+    // SAFETY: `kill(2)` takes plain integers and has no memory-safety
+    // preconditions; a negative pid addresses the process group `pgid`.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+/// Blocks until the child has exited, *without* reaping it. The zombie keeps
+/// its pid reserved, so a watchdog that is still about to signal that pid
+/// cannot hit a recycled one; the actual reap (`Child::wait`) happens only
+/// after the watchdog has been told to stand down.
+fn wait_exit_without_reaping(pid: u32) {
+    // SAFETY: an all-zero `siginfo_t` is a valid value for `waitid` to
+    // overwrite; it is only ever written to, never read.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        // SAFETY: `info` is a valid, exclusive out-parameter for the call,
+        // and `P_PID` with a pid we spawned and have not yet reaped is valid.
+        let rc = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        if rc == 0 || io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
 /// Best-effort termination plus reaping, so an abandoned child never lingers
 /// as a zombie or keeps a pipe end open.
 fn reap(child: &mut Child) {
+    kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WatchState {
+    Running,
+    /// The child exited on its own (or was killed for another reason) and
+    /// the watchdog must not signal anything any more.
+    Finished,
+    /// The deadline passed and the watchdog killed the child's group.
+    TimedOut,
+}
+
+/// Wall-clock deadline for one child. The state lives under a mutex so that
+/// "deadline passed, kill" and "child finished, stand down" are mutually
+/// exclusive: the kill only ever happens while the state is `Running`, and
+/// the main thread flips it to `Finished` *before* reaping. Combined with
+/// `wait_exit_without_reaping`, the pid is guaranteed to still belong to our
+/// (possibly zombie) child whenever a kill is sent.
+struct Watchdog {
+    state: Mutex<WatchState>,
+    wake: Condvar,
+}
+
+impl Watchdog {
+    fn new() -> Self {
+        Self { state: Mutex::new(WatchState::Running), wake: Condvar::new() }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, WatchState> {
+        // A poisoned lock only means another thread panicked; the plain-enum
+        // state inside is still valid, so carry on rather than propagate.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Body of the watchdog thread: sleeps until the deadline or until told
+    /// to stand down, and kills the process group only in the former case.
+    fn supervise(&self, pid: u32, timeout: Duration) {
+        let (mut state, _) = self
+            .wake
+            .wait_timeout_while(self.lock(), timeout, |s| *s == WatchState::Running)
+            .unwrap_or_else(PoisonError::into_inner);
+        if *state == WatchState::Running {
+            kill_process_group(pid);
+            *state = WatchState::TimedOut;
+        }
+    }
+
+    /// Stands the watchdog down. Returns whether it had already fired.
+    fn finish(&self) -> bool {
+        let mut state = self.lock();
+        if *state == WatchState::Running {
+            *state = WatchState::Finished;
+        }
+        let timed_out = *state == WatchState::TimedOut;
+        drop(state);
+        self.wake.notify_all();
+        timed_out
+    }
 }
 
 fn join_worker<T>(handle: thread::ScopedJoinHandle<'_, T>) -> Result<T, PipelineError> {
@@ -178,8 +281,46 @@ where
     R: Read + Send,
     W: Write,
 {
+    run_filter_inner(program, args, input, output, None)
+}
+
+/// [`run_filter`] with a wall-clock budget. If the child (or anything it
+/// spawned) is still running `timeout` after the start, its whole process
+/// group is SIGKILLed: every pipe closes, all three workers unblock, the
+/// child is reaped, and the run ends with [`PipelineError::Timeout`] —
+/// taking precedence over the secondary symptoms of the kill (a signal exit
+/// status, broken pipes). A run that finishes in time is unaffected, and its
+/// watchdog thread is released immediately rather than sleeping out the
+/// remaining budget. As with every error, `output` may be partial.
+pub fn run_filter_timeout<R, W>(
+    program: &str,
+    args: &[&str],
+    input: R,
+    output: &mut W,
+    timeout: Duration,
+) -> Result<Transfer, PipelineError>
+where
+    R: Read + Send,
+    W: Write,
+{
+    run_filter_inner(program, args, input, output, Some(timeout))
+}
+
+fn run_filter_inner<R, W>(
+    program: &str,
+    args: &[&str],
+    input: R,
+    output: &mut W,
+    timeout: Option<Duration>,
+) -> Result<Transfer, PipelineError>
+where
+    R: Read + Send,
+    W: Write,
+{
     let mut child = Command::new(program)
         .args(args)
+        // Own process group, so a kill can reach the whole process tree.
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -192,6 +333,10 @@ where
         reap(&mut child);
         return Err(PipelineError::Child(io::Error::other("child pipe handle missing")));
     };
+
+    // Declared before the scope so the watchdog thread may borrow them.
+    let pid = child.id();
+    let watchdog = Watchdog::new();
 
     thread::scope(|scope| {
         // `Builder::spawn_scoped` instead of `Scope::spawn`: the latter
@@ -219,13 +364,46 @@ where
             }
         };
 
+        let watchdog = &watchdog;
+        let watcher = match timeout {
+            None => None,
+            Some(limit) => {
+                let spawned = thread::Builder::new()
+                    .name("y4p-pipe-watchdog".into())
+                    .spawn_scoped(scope, move || watchdog.supervise(pid, limit));
+                match spawned {
+                    Ok(handle) => Some(handle),
+                    Err(e) => {
+                        reap(&mut child);
+                        return Err(PipelineError::Child(e));
+                    }
+                }
+            }
+        };
+
         let relayed = relay(&mut stdout, output);
         if relayed.is_err() {
-            let _ = child.kill();
+            kill_process_group(pid);
         }
+        let timed_out = if watcher.is_some() {
+            // Wait for the exit without reaping, stand the watchdog down,
+            // and only then reap: see `Watchdog` for why this order is what
+            // keeps a late kill from ever hitting a recycled pid.
+            wait_exit_without_reaping(pid);
+            watchdog.finish()
+        } else {
+            false
+        };
         let status = child.wait();
         let fed = join_worker(feeder);
         let captured = join_worker(drainer);
+        if let Some(handle) = watcher {
+            let _ = join_worker(handle);
+        }
+
+        if timed_out {
+            return Err(PipelineError::Timeout(timeout.unwrap_or_default()));
+        }
 
         let bytes_out = match relayed {
             Ok(n) => n,
@@ -494,5 +672,167 @@ mod tests {
         assert!(!PipelineError::Sink(io::Error::other("write error")).is_unavailable());
         assert!(!PipelineError::Child(io::Error::other("pipe broken")).is_unavailable());
         assert!(!PipelineError::Failed { code: Some(1), stderr: "syntax error".into() }.is_unavailable());
+    }
+
+    // --- wall-clock timeout ---
+
+    fn run_sh_timeout(
+        script: &'static str,
+        input: Vec<u8>,
+        timeout: Duration,
+    ) -> (Result<Transfer, PipelineError>, Vec<u8>, Duration) {
+        within_deadline(move || {
+            let started = std::time::Instant::now();
+            let mut out = Vec::new();
+            let result = run_filter_timeout("sh", &["-c", script], Cursor::new(input), &mut out, timeout);
+            (result, out, started.elapsed())
+        })
+    }
+
+    /// True once `pid` is no longer actively executing (either completely reaped,
+    /// or in state 'Z' waiting for PID 1 / init to reap it).
+    fn process_is_gone(pid: u32) -> bool {
+        let Ok(p) = i32::try_from(pid) else { return true };
+        // SAFETY: signal 0 performs error checking without delivering a signal.
+        let exists = unsafe { libc::kill(p, 0) == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) };
+        if !exists {
+            return true;
+        }
+
+        // Process entry still present in kernel table: check if it has transitioned to
+        // Zombie ('Z') state, meaning SIGKILL successfully terminated its execution.
+        match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+            Err(_) => true,
+            Ok(status) => status.lines().any(|l| l.starts_with("State:") && l.contains('Z')),
+        }
+    }
+
+    fn wait_until_gone(pid: u32) -> bool {
+        // Allow up to 5 seconds (100 * 50ms) to accommodate heavy CI runner load.
+        for _ in 0..100 {
+            if process_is_gone(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn a_hanging_child_is_killed_at_the_deadline_with_a_timeout_error() {
+        let limit = Duration::from_millis(300);
+        let (result, _, elapsed) = run_sh_timeout("sleep 30; echo unreachable", Vec::new(), limit);
+        match result {
+            Err(PipelineError::Timeout(reported)) => assert_eq!(reported, limit),
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+        assert!(elapsed >= limit, "must not fire early: {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(10), "must not wait out the child: {elapsed:?}");
+    }
+
+    #[test]
+    fn a_hung_child_that_never_reads_a_large_input_is_still_unblocked() {
+        // 4MiB can never fit in the pipe: the stdin feeder is blocked in
+        // write(2) until the kill breaks the pipe.
+        let (result, _, elapsed) = run_sh_timeout("sleep 30", patterned(4 * 1024 * 1024), Duration::from_millis(300));
+        assert!(matches!(result, Err(PipelineError::Timeout(_))), "got {result:?}");
+        assert!(elapsed < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_child_that_closes_stdout_and_then_hangs_is_still_killed() {
+        // The relay sees EOF at once; only the wait for exit can hang.
+        let (result, _, elapsed) = run_sh_timeout("exec >&-; sleep 30", Vec::new(), Duration::from_millis(300));
+        assert!(matches!(result, Err(PipelineError::Timeout(_))), "got {result:?}");
+        assert!(elapsed < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_killed_child_is_reaped_rather_than_left_as_a_zombie() {
+        let (result, out, _) = run_sh_timeout("echo $$; sleep 30; echo x", Vec::new(), Duration::from_millis(400));
+        assert!(matches!(result, Err(PipelineError::Timeout(_))));
+        let pid: u32 = String::from_utf8_lossy(&out).trim().parse().unwrap();
+        // A zombie would still have a /proc entry (state Z); a reaped
+        // child has none at all.
+        assert!(
+            std::fs::metadata(format!("/proc/{pid}")).is_err(),
+            "pid {pid} was killed but not reaped"
+        );
+    }
+
+    #[test]
+    fn helper_processes_spawned_by_the_child_are_killed_too() {
+        // The grandchild inherits the stdout pipe. If only the direct child
+        // were killed, the pipe would stay open and the run would hang.
+        let (result, out, elapsed) = run_sh_timeout("sleep 60 & echo $!; wait", Vec::new(), Duration::from_millis(500));
+        assert!(matches!(result, Err(PipelineError::Timeout(_))), "got {result:?}");
+        assert!(elapsed < Duration::from_secs(10));
+        let grandchild: u32 = String::from_utf8_lossy(&out).trim().parse().unwrap();
+        assert!(wait_until_gone(grandchild), "grandchild {grandchild} survived the group kill");
+    }
+
+    #[test]
+    fn a_child_that_finishes_in_time_is_unaffected_and_the_watchdog_is_released_promptly() {
+        // A 60s budget the run must not sit out.
+        let payload = patterned(256 * 1024);
+        let expected = payload.clone();
+        let (result, elapsed, out) = within_deadline(move || {
+            let started = std::time::Instant::now();
+            let mut out = Vec::new();
+            let result = run_filter_timeout("cat", &[], Cursor::new(payload), &mut out, Duration::from_secs(60));
+            (result, started.elapsed(), out)
+        });
+        result.unwrap();
+        assert_eq!(out, expected);
+        assert!(elapsed < Duration::from_secs(10), "the watchdog thread kept the run waiting: {elapsed:?}");
+    }
+
+    #[test]
+    fn ordinary_failures_are_not_mistaken_for_timeouts() {
+        let (result, _, _) = run_sh_timeout("echo nope >&2; exit 3", Vec::new(), Duration::from_secs(30));
+        match result {
+            Err(PipelineError::Failed { code, stderr }) => {
+                assert_eq!(code, Some(3));
+                assert_eq!(stderr, "nope");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_zero_budget_times_out_immediately_instead_of_hanging() {
+        let (result, _, elapsed) = run_sh_timeout("sleep 30", Vec::new(), Duration::ZERO);
+        assert!(matches!(result, Err(PipelineError::Timeout(_))), "got {result:?}");
+        assert!(elapsed < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_failing_sink_is_still_reported_as_a_sink_error_under_a_timeout() {
+        let result = within_deadline(|| {
+            let mut sink = FailingSink { limit: 100_000, written: 0 };
+            run_filter_timeout("yes", &[], Cursor::new(Vec::new()), &mut sink, Duration::from_secs(60))
+        });
+        assert!(matches!(result, Err(PipelineError::Sink(_))), "got {result:?}");
+    }
+
+    #[test]
+    fn many_quick_runs_under_a_deadline_never_race_into_a_false_timeout() {
+        // Hammers the finish-versus-fire handshake: every run completes long
+        // before its deadline, so any Timeout would be a race bug.
+        within_deadline(|| {
+            for round in 0..150 {
+                let mut out = Vec::new();
+                let result = run_filter_timeout("cat", &[], Cursor::new(patterned(1000 + round)), &mut out, Duration::from_secs(20));
+                assert!(result.is_ok(), "round {round}: {result:?}");
+                assert_eq!(out.len(), 1000 + round);
+            }
+        });
+    }
+
+    #[test]
+    fn timeout_display_names_the_limit() {
+        let text = PipelineError::Timeout(Duration::from_secs(15)).to_string();
+        assert!(text.contains("15") && text.contains("time limit"), "{text}");
+        assert!(!PipelineError::Timeout(Duration::from_secs(15)).is_unavailable());
     }
 }
