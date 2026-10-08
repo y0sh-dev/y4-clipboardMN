@@ -12,6 +12,9 @@
 //!
 //! Conversions run behind a [`CircuitBreaker`]: a converter that keeps
 //! failing is skipped for a cooldown instead of being re-spawned per image.
+//! They also run under a [`ProcessThrottle`]: only a few converter processes
+//! exist at once, and an image that cannot get a slot in time is stored
+//! unmodified. The two are orthogonal: a busy converter is not a failing one.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,13 +22,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::core::constants::{
-    IMAGE_BREAKER_COOLDOWN_SECS, IMAGE_BREAKER_THRESHOLD, IMAGE_INGEST_JPEG_QUALITY, LOG_WARN,
-    MSG_IMAGE_TOOL_MISSING, log_image_breaker_closed, log_image_breaker_open,
+    IMAGE_BREAKER_COOLDOWN_SECS, IMAGE_BREAKER_THRESHOLD, IMAGE_CONCURRENCY_LIMIT,
+    IMAGE_INGEST_JPEG_QUALITY, IMAGE_THROTTLE_WAIT_MS, LOG_WARN, MSG_IMAGE_TOOL_MISSING,
+    log_image_breaker_closed, log_image_breaker_open, log_image_throttled,
 };
 use crate::core::utils::detect_image_mime;
 use crate::image::breaker::{CircuitBreaker, PermitOutcome};
 use crate::image::magick;
 use crate::image::pipeline::{PipelineError, Transfer};
+use crate::image::throttle::ProcessThrottle;
 use crate::image::transcode::{self, InputFormat, OutputFormat, Quality, Transcode};
 
 /// Bytes inspected when classifying a payload. Binary image signatures fit
@@ -95,7 +100,20 @@ fn is_converter_fault(error: &PipelineError) -> bool {
 /// bypassed by classification or policy never touch the breaker, a missing
 /// tool is released neutrally, and while the circuit is open the original is
 /// returned without calling `convert` at all.
-pub fn route_with<F>(mime: String, payload: Vec<u8>, breaker: &CircuitBreaker, convert: F) -> (String, Vec<u8>)
+///
+/// Concurrency is capped by `throttle`. The breaker is consulted first so an
+/// open circuit never makes anyone wait for a slot. If no slot frees up within
+/// the throttle's budget the original is returned and the breaker permit is
+/// released neutrally: a busy converter is not a broken one, and counting it
+/// would let a burst of images open the circuit and suspend conversion for
+/// the cooldown even though the converter is healthy.
+pub fn route_with<F>(
+    mime: String,
+    payload: Vec<u8>,
+    breaker: &CircuitBreaker,
+    throttle: &ProcessThrottle,
+    convert: F,
+) -> (String, Vec<u8>)
 where
     F: FnOnce(Transcode, &[u8], &mut Vec<u8>) -> Result<Transfer, PipelineError>,
 {
@@ -109,8 +127,19 @@ where
 
     let Some(permit) = breaker.acquire() else { return (mime, payload) };
 
+    let Some(slot) = throttle.acquire() else {
+        permit.release();
+        eprintln!("{}", log_image_throttled(duration_ms(throttle.wait())));
+        return (mime, payload);
+    };
+
     let mut converted = Vec::new();
-    let (outcome, result_pair) = match convert(Transcode { input, output }, &payload, &mut converted) {
+    let result = convert(Transcode { input, output }, &payload, &mut converted);
+    // The process is gone: hand the slot to the next waiter before doing the
+    // (cheap, but lock-taking) bookkeeping below.
+    drop(slot);
+
+    let (outcome, result_pair) = match result {
         Ok(_) if is_valid_output(output, &converted) => {
             (PermitOutcome::Success, (output.mime().to_owned(), converted))
         }
@@ -136,8 +165,13 @@ fn report_failure(tripped: bool) {
     }
 }
 
+/// Whole milliseconds for log output, saturating instead of truncating.
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Ingestion entry point: [`route_with`] backed by the real `magick` and the
-/// process-wide breaker.
+/// process-wide breaker and throttle.
 ///
 /// `magick` is only probed (and only spawned) once a payload has been
 /// classified as a convertible raster image, so text, HTML, SVG and URI
@@ -147,8 +181,10 @@ pub fn route_for_ingest(mime: String, payload: Vec<u8>) -> (String, Vec<u8>) {
     static WARNED: AtomicBool = AtomicBool::new(false);
     static BREAKER: CircuitBreaker =
         CircuitBreaker::new(IMAGE_BREAKER_THRESHOLD, Duration::from_secs(IMAGE_BREAKER_COOLDOWN_SECS));
+    static THROTTLE: ProcessThrottle =
+        ProcessThrottle::new(IMAGE_CONCURRENCY_LIMIT, Duration::from_millis(IMAGE_THROTTLE_WAIT_MS));
 
-    route_with(mime, payload, &BREAKER, |job, input, output| {
+    route_with(mime, payload, &BREAKER, &THROTTLE, |job, input, output| {
         if !magick::is_available() {
             if !WARNED.swap(true, Ordering::Relaxed) {
                 eprintln!("{}{}", LOG_WARN, MSG_IMAGE_TOOL_MISSING);
@@ -165,6 +201,9 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::io::empty;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use std::time::Instant;
     use crate::image::breaker::BreakerState;
 
     fn magick_or_skip() -> bool {
@@ -202,16 +241,22 @@ mod tests {
         CircuitBreaker::new(3, Duration::from_secs(30))
     }
 
-    /// Runs `route_with` on `breaker` with a converter that records how it
-    /// was called and answers with `reply`.
-    fn route_on(
+    /// A throttle that never gets in the way of tests that are not about it.
+    fn roomy_throttle() -> ProcessThrottle {
+        ProcessThrottle::new(64, Duration::from_secs(30))
+    }
+
+    /// Runs `route_with` on `breaker` and `throttle` with a converter that
+    /// records how it was called and answers with `reply`.
+    fn route_through(
         breaker: &CircuitBreaker,
+        throttle: &ProcessThrottle,
         mime: &str,
         payload: Vec<u8>,
         reply: Result<Vec<u8>, PipelineError>,
     ) -> ((String, Vec<u8>), Option<Transcode>) {
         let called = Cell::new(None);
-        let routed = route_with(mime.to_owned(), payload, breaker, |job, _, out| {
+        let routed = route_with(mime.to_owned(), payload, breaker, throttle, |job, _, out| {
             called.set(Some(job));
             let bytes = reply?;
             let len = bytes.len() as u64;
@@ -219,6 +264,16 @@ mod tests {
             Ok(Transfer { bytes_in: 0, bytes_out: len })
         });
         (routed, called.get())
+    }
+
+    /// Same, on an unconstrained throttle.
+    fn route_on(
+        breaker: &CircuitBreaker,
+        mime: &str,
+        payload: Vec<u8>,
+        reply: Result<Vec<u8>, PipelineError>,
+    ) -> ((String, Vec<u8>), Option<Transcode>) {
+        route_through(breaker, &roomy_throttle(), mime, payload, reply)
     }
 
     /// Same, on a throwaway breaker (for tests that are not about the breaker).
@@ -536,7 +591,7 @@ mod tests {
         trip(&breaker);
 
         let nested_called = Cell::new(false);
-        let outer = route_with("image/png".to_owned(), png_header(), &breaker, |_, _, out| {
+        let outer = route_with("image/png".to_owned(), png_header(), &breaker, &roomy_throttle(), |_, _, out| {
             // While this canary is running, a second image arrives.
             let (inner, called) = route_on(&breaker, "image/png", png_header(), Ok(fake_webp()));
             nested_called.set(called.is_some());
@@ -558,11 +613,282 @@ mod tests {
         let mut corrupt = png_header();
         corrupt.extend_from_slice(&[0xA5; 2048]);
         for _ in 0..5 {
-            let routed = route_with("image/png".to_owned(), corrupt.clone(), &breaker, |job, input, out| {
+            let routed = route_with("image/png".to_owned(), corrupt.clone(), &breaker, &roomy_throttle(), |job, input, out| {
                 crate::image::transcode::transcode(job, input, out)
             });
             assert_eq!(routed, ("image/png".to_owned(), corrupt.clone()));
         }
         assert_eq!(breaker.state(), BreakerState::Open);
+    }
+
+    // --- process throttle ---
+
+    /// A converter reply that would convert successfully, used to prove that
+    /// a refused request really never reaches the converter.
+    fn would_succeed() -> Result<Vec<u8>, PipelineError> {
+        Ok(fake_webp())
+    }
+
+    #[test]
+    fn a_saturated_throttle_falls_back_to_the_original_without_invoking_the_converter() {
+        let breaker = fresh_breaker();
+        let throttle = ProcessThrottle::new(1, Duration::from_millis(20));
+        let _held = throttle.acquire().unwrap();
+
+        let (routed, called) = route_through(&breaker, &throttle, "image/png", png_header(), would_succeed());
+        assert!(called.is_none(), "no process may be spawned past the cap");
+        assert_eq!(routed, ("image/png".to_owned(), png_header()), "zero data loss, original MIME kept");
+        assert_eq!(throttle.in_use(), 1, "the refused request must not disturb the slot count");
+    }
+
+    #[test]
+    fn saturation_waits_for_the_budget_before_falling_back() {
+        let budget = Duration::from_millis(100);
+        let throttle = ProcessThrottle::new(1, budget);
+        let _held = throttle.acquire().unwrap();
+
+        let started = Instant::now();
+        let (routed, _) = route_through(&fresh_breaker(), &throttle, "image/png", png_header(), would_succeed());
+        assert!(started.elapsed() >= budget, "fell back after {:?}, before the budget", started.elapsed());
+        assert_eq!(routed.1, png_header());
+    }
+
+    #[test]
+    fn saturation_never_counts_towards_the_breaker() {
+        let throttle = ProcessThrottle::new(1, Duration::ZERO);
+        let _held = throttle.acquire().unwrap();
+
+        // A threshold of 1 is the harshest case: a single counted failure opens it.
+        let strict = CircuitBreaker::new(1, Duration::from_secs(30));
+        for _ in 0..50 {
+            route_through(&strict, &throttle, "image/png", png_header(), would_succeed());
+        }
+        assert_eq!(strict.state(), BreakerState::Closed);
+    }
+
+    #[test]
+    fn saturation_neither_advances_nor_resets_the_failure_count() {
+        let breaker = fresh_breaker();
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+
+        let throttle = ProcessThrottle::new(1, Duration::ZERO);
+        let _held = throttle.acquire().unwrap();
+        for _ in 0..20 {
+            route_through(&breaker, &throttle, "image/png", png_header(), would_succeed());
+        }
+        assert_eq!(breaker.state(), BreakerState::Closed, "saturation must not count as a failure");
+
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        assert_eq!(breaker.state(), BreakerState::Open, "nor may it have reset the two earlier failures");
+    }
+
+    #[test]
+    fn a_saturated_canary_hands_the_probe_back_instead_of_wedging_the_breaker() {
+        let breaker = CircuitBreaker::new(3, Duration::ZERO);
+        trip(&breaker);
+
+        let throttle = ProcessThrottle::new(1, Duration::ZERO);
+        let held = throttle.acquire().unwrap();
+        let (routed, called) = route_through(&breaker, &throttle, "image/png", png_header(), would_succeed());
+        assert!(called.is_none());
+        assert_eq!(routed, ("image/png".to_owned(), png_header()));
+        assert_eq!(breaker.state(), BreakerState::HalfOpen, "no verdict yet: neither closed nor re-opened");
+
+        drop(held);
+        let (routed, called) = route_through(&breaker, &throttle, "image/png", png_header(), would_succeed());
+        assert!(called.is_some(), "the next image must be allowed to probe");
+        assert_eq!(routed.0, "image/webp");
+        assert_eq!(breaker.state(), BreakerState::Closed);
+    }
+
+    #[test]
+    fn an_open_circuit_never_waits_for_a_slot() {
+        let breaker = fresh_breaker();
+        trip(&breaker);
+        let throttle = ProcessThrottle::new(1, Duration::from_secs(30));
+        let _held = throttle.acquire().unwrap();
+
+        let started = Instant::now();
+        let (routed, called) = route_through(&breaker, &throttle, "image/png", png_header(), would_succeed());
+        assert!(started.elapsed() < Duration::from_secs(10), "waited for a slot behind an open circuit");
+        assert!(called.is_none());
+        assert_eq!(routed, ("image/png".to_owned(), png_header()));
+    }
+
+    #[test]
+    fn bypassed_payloads_never_take_or_wait_for_a_slot() {
+        let throttle = ProcessThrottle::new(1, Duration::from_secs(30));
+        let _held = throttle.acquire().unwrap();
+        let started = Instant::now();
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("text/plain", b"hello".to_vec()),
+            ("image/svg+xml", b"<svg/>".to_vec()),
+            ("image/gif", b"GIF89a....".to_vec()),
+            ("image/png", Vec::new()),
+        ];
+        for (mime, payload) in cases {
+            let (routed, called) =
+                route_through(&fresh_breaker(), &throttle, mime, payload.clone(), would_succeed());
+            assert!(called.is_none());
+            assert_eq!(routed, (mime.to_owned(), payload));
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "a bypass waited on the throttle");
+    }
+
+    #[test]
+    fn the_slot_is_released_after_every_kind_of_outcome() {
+        let throttle = ProcessThrottle::new(1, Duration::ZERO);
+        let replies: Vec<Result<Vec<u8>, PipelineError>> = vec![
+            would_succeed(),
+            Err(failed()),
+            Err(PipelineError::Timeout(Duration::from_secs(15))),
+            Err(PipelineError::Spawn(io::Error::from(io::ErrorKind::NotFound))),
+            Ok(Vec::new()),
+        ];
+        for reply in replies {
+            let breaker = CircuitBreaker::new(100, Duration::from_secs(30));
+            route_through(&breaker, &throttle, "image/png", png_header(), reply);
+            assert_eq!(throttle.in_use(), 0, "slot leaked");
+        }
+    }
+
+    #[test]
+    fn a_panicking_converter_still_releases_its_slot() {
+        let breaker = fresh_breaker();
+        let throttle = ProcessThrottle::new(1, Duration::ZERO);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            route_with("image/png".to_owned(), png_header(), &breaker, &throttle, |_, _, _| {
+                panic!("converter blew up")
+            })
+        }));
+        assert!(result.is_err());
+        assert_eq!(throttle.in_use(), 0, "unwinding must free the slot");
+        assert!(throttle.acquire().is_some());
+    }
+
+    #[test]
+    fn a_burst_falls_back_deterministically_while_the_only_slot_is_busy() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(30));
+        let throttle = ProcessThrottle::new(1, Duration::from_millis(20));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        std::thread::scope(|scope| {
+            let (breaker, throttle) = (&breaker, &throttle);
+            let first = scope.spawn(move || {
+                route_with("image/png".to_owned(), png_header(), breaker, throttle, |_, _, out| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    *out = fake_webp();
+                    Ok(Transfer { bytes_in: 0, bytes_out: out.len() as u64 })
+                })
+            });
+            entered_rx.recv().unwrap();
+
+            // The first conversion now owns the only slot. A burst behind it
+            // is stored untouched, never converted and never lost.
+            for _ in 0..5 {
+                let (routed, called) = route_through(breaker, throttle, "image/png", png_header(), would_succeed());
+                assert!(called.is_none());
+                assert_eq!(routed, ("image/png".to_owned(), png_header()));
+            }
+
+            release_tx.send(()).unwrap();
+            assert_eq!(first.join().unwrap().0, "image/webp", "the admitted conversion still completes");
+        });
+        assert_eq!(breaker.state(), BreakerState::Closed, "a threshold-1 breaker would have opened on one counted fault");
+        assert_eq!(throttle.in_use(), 0);
+    }
+
+    #[test]
+    fn a_waiting_image_is_converted_once_a_slot_frees_up_in_time() {
+        let breaker = fresh_breaker();
+        let throttle = ProcessThrottle::new(1, Duration::from_secs(30));
+        let held = throttle.acquire().unwrap();
+
+        std::thread::scope(|scope| {
+            let (breaker, throttle) = (&breaker, &throttle);
+            let waiter = scope.spawn(move || {
+                route_through(breaker, throttle, "image/png", png_header(), would_succeed()).0
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            drop(held);
+            assert_eq!(waiter.join().unwrap().0, "image/webp");
+        });
+        assert_eq!(throttle.in_use(), 0);
+    }
+
+    #[test]
+    fn conversions_never_exceed_the_cap_and_nothing_is_lost_in_a_burst() {
+        const LIMIT: usize = 2;
+        const IMAGES: usize = 12;
+        let breaker = fresh_breaker();
+        let throttle = ProcessThrottle::new(LIMIT, Duration::from_secs(30));
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..IMAGES {
+                scope.spawn(|| {
+                    let routed = route_with("image/png".to_owned(), png_header(), &breaker, &throttle, |_, _, out| {
+                        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(10));
+                        running.fetch_sub(1, Ordering::SeqCst);
+                        *out = fake_webp();
+                        Ok(Transfer { bytes_in: 0, bytes_out: out.len() as u64 })
+                    });
+                    assert_eq!(routed, ("image/webp".to_owned(), fake_webp()));
+                });
+            }
+        });
+        assert!(peak.load(Ordering::SeqCst) <= LIMIT, "{} converters ran at once", peak.load(Ordering::SeqCst));
+        assert_eq!(throttle.in_use(), 0);
+    }
+
+    #[test]
+    fn a_poisoned_throttle_still_admits_and_still_falls_back() {
+        let breaker = fresh_breaker();
+        let throttle = ProcessThrottle::new(1, Duration::ZERO);
+        crate::image::throttle::poison_for_test(&throttle);
+
+        let (routed, called) = route_through(&breaker, &throttle, "image/png", png_header(), would_succeed());
+        assert!(called.is_some(), "a poisoned lock must not disable conversion");
+        assert_eq!(routed.0, "image/webp");
+
+        let _held = throttle.acquire().unwrap();
+        let (routed, called) = route_through(&breaker, &throttle, "image/png", png_header(), would_succeed());
+        assert!(called.is_none(), "the cap still holds on a poisoned lock");
+        assert_eq!(routed, ("image/png".to_owned(), png_header()));
+    }
+
+    #[test]
+    fn real_magick_burst_stays_within_the_cap() {
+        if !magick_or_skip() { return; }
+        const LIMIT: usize = 2;
+        let original = png();
+        let breaker = fresh_breaker();
+        let throttle = ProcessThrottle::new(LIMIT, Duration::from_secs(60));
+        let running = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    let routed = route_with("image/png".to_owned(), original.clone(), &breaker, &throttle, |job, input, out| {
+                        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        let result = transcode::transcode(job, input, out);
+                        running.fetch_sub(1, Ordering::SeqCst);
+                        result
+                    });
+                    assert_eq!(routed.0, "image/webp");
+                });
+            }
+        });
+        assert!(peak.load(Ordering::SeqCst) <= LIMIT);
+        assert_eq!(breaker.state(), BreakerState::Closed);
+        assert_eq!(throttle.in_use(), 0);
     }
 }
