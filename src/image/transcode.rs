@@ -11,6 +11,7 @@
 //! there is no way to smuggle an option, a `coder:` prefix or a filename
 //! through clipboard-controlled data.
 
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -40,13 +41,16 @@ pub enum InputFormat {
 }
 
 impl InputFormat {
-    fn coder(self) -> &'static str {
+    /// The pinned-decoder input argument: `coder:-` (stdin) with `[0]`
+    /// selecting the first frame, so an animated GIF/WebP cannot expand into
+    /// a frame sequence. A static string per format, hence no allocation.
+    fn pinned_input(self) -> &'static str {
         match self {
-            Self::Png => "png",
-            Self::Jpeg => "jpeg",
-            Self::Gif => "gif",
-            Self::Webp => "webp",
-            Self::Bmp => "bmp",
+            Self::Png => "png:-[0]",
+            Self::Jpeg => "jpeg:-[0]",
+            Self::Gif => "gif:-[0]",
+            Self::Webp => "webp:-[0]",
+            Self::Bmp => "bmp:-[0]",
         }
     }
 
@@ -133,6 +137,26 @@ pub struct Transcode {
     pub output: OutputFormat,
 }
 
+/// Resource ceilings passed to every run as `-limit <name> <value>`.
+const LIMITS: [(&str, &str); 6] = [
+    ("width", IMAGE_LIMIT_WIDTH_PX),
+    ("height", IMAGE_LIMIT_HEIGHT_PX),
+    ("memory", IMAGE_LIMIT_MEMORY),
+    ("map", IMAGE_LIMIT_MAP),
+    ("disk", IMAGE_LIMIT_DISK),
+    ("time", IMAGE_LIMIT_TIME_SECS),
+];
+
+/// Longest possible argument vector (a WebP encode): 3 tokens per limit,
+/// the input, `-auto-orient`, `-strip`, then `-define k=v`, `-quality q`
+/// and the output. A capacity hint only: exceeding it would merely
+/// reallocate, and a test pins it to the real maximum.
+const ARGS_CAPACITY: usize = LIMITS.len() * 3 + 3 + 5;
+
+/// `IMAGE_QUALITY_MAX` as an argument, spelled out so the lossless path
+/// borrows it instead of formatting it per run (a test ties the two together).
+const LOSSLESS_QUALITY_ARG: &str = "100";
+
 impl Transcode {
     /// The complete `magick` argument vector, in the one order that is safe:
     ///
@@ -146,35 +170,32 @@ impl Transcode {
     /// 4. `-strip` removes every profile and comment (EXIF incl. GPS and
     ///    camera/timestamp tags, XMP, IPTC, ICC, text chunks).
     /// 5. Encoder settings, then the output `fmt:-`.
-    fn args(&self) -> Vec<String> {
-        let mut args: Vec<String> = Vec::new();
-        for (name, value) in [
-            ("width", IMAGE_LIMIT_WIDTH_PX),
-            ("height", IMAGE_LIMIT_HEIGHT_PX),
-            ("memory", IMAGE_LIMIT_MEMORY),
-            ("map", IMAGE_LIMIT_MAP),
-            ("disk", IMAGE_LIMIT_DISK),
-            ("time", IMAGE_LIMIT_TIME_SECS),
-        ] {
-            args.extend(["-limit".to_owned(), name.to_owned(), value.to_owned()]);
+    ///
+    /// Every token is a borrowed `'static` string except the quality of a
+    /// lossy encode, the one value computed at run time: the vector is the
+    /// only allocation besides it (sized up front, never regrown).
+    fn args(&self) -> Vec<Cow<'static, str>> {
+        let mut args: Vec<Cow<'static, str>> = Vec::with_capacity(ARGS_CAPACITY);
+        for (name, value) in LIMITS {
+            args.extend([Cow::Borrowed("-limit"), Cow::Borrowed(name), Cow::Borrowed(value)]);
         }
-        args.push(format!("{}:-[0]", self.input.coder()));
-        args.push("-auto-orient".to_owned());
-        args.push("-strip".to_owned());
+        args.push(Cow::Borrowed(self.input.pinned_input()));
+        args.push(Cow::Borrowed("-auto-orient"));
+        args.push(Cow::Borrowed("-strip"));
         match self.output {
             OutputFormat::Png => {
-                args.extend(["-define".to_owned(), "png:compression-level=9".to_owned()]);
-                args.push("png:-".to_owned());
+                args.extend([Cow::Borrowed("-define"), Cow::Borrowed("png:compression-level=9")]);
+                args.push(Cow::Borrowed("png:-"));
             }
             OutputFormat::WebpLossless => {
-                args.extend(["-define".to_owned(), "webp:lossless=true".to_owned()]);
-                args.extend(["-quality".to_owned(), IMAGE_QUALITY_MAX.to_string()]);
-                args.push("webp:-".to_owned());
+                args.extend([Cow::Borrowed("-define"), Cow::Borrowed("webp:lossless=true")]);
+                args.extend([Cow::Borrowed("-quality"), Cow::Borrowed(LOSSLESS_QUALITY_ARG)]);
+                args.push(Cow::Borrowed("webp:-"));
             }
             OutputFormat::WebpLossy(quality) => {
-                args.extend(["-define".to_owned(), "webp:lossless=false".to_owned()]);
-                args.extend(["-quality".to_owned(), quality.get().to_string()]);
-                args.push("webp:-".to_owned());
+                args.extend([Cow::Borrowed("-define"), Cow::Borrowed("webp:lossless=false")]);
+                args.extend([Cow::Borrowed("-quality"), Cow::Owned(quality.get().to_string())]);
+                args.push(Cow::Borrowed("webp:-"));
             }
         }
         args
@@ -199,7 +220,7 @@ where
     W: Write,
 {
     let args = job.args();
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let refs: Vec<&str> = args.iter().map(|arg| &**arg).collect();
     magick::run_with_timeout(&refs, input, output, Duration::from_secs(IMAGE_TRANSCODE_TIMEOUT_SECS))
 }
 
@@ -226,6 +247,11 @@ mod tests {
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// The argument vector as plain `String`s, for assertions that read better that way.
+    fn owned_args(job: &Transcode) -> Vec<String> {
+        job.args().into_iter().map(Cow::into_owned).collect()
     }
 
     fn lossy(quality: u8) -> OutputFormat {
@@ -326,10 +352,73 @@ mod tests {
 
     // --- argument construction (needs no magick) ---
 
+    // --- allocation behaviour of argument construction ---
+
+    const ALL_INPUTS: [InputFormat; 5] =
+        [InputFormat::Png, InputFormat::Jpeg, InputFormat::Gif, InputFormat::Webp, InputFormat::Bmp];
+
+    fn all_jobs() -> Vec<Transcode> {
+        let outputs = [OutputFormat::Png, OutputFormat::WebpLossless, lossy(1), lossy(90), lossy(100)];
+        ALL_INPUTS.iter().flat_map(|&input| outputs.iter().map(move |&output| Transcode { input, output })).collect()
+    }
+
+    fn owned_count(args: &[Cow<'static, str>]) -> usize {
+        args.iter().filter(|arg| matches!(arg, Cow::Owned(_))).count()
+    }
+
+    #[test]
+    fn lossless_argument_vectors_are_built_entirely_from_borrowed_static_tokens() {
+        for input in ALL_INPUTS {
+            for output in [OutputFormat::Png, OutputFormat::WebpLossless] {
+                let args = Transcode { input, output }.args();
+                assert_eq!(owned_count(&args), 0, "{input:?} -> {output:?} allocated a token");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lossy_encode_allocates_exactly_one_token_the_quality_value() {
+        for input in ALL_INPUTS {
+            let args = Transcode { input, output: lossy(70) }.args();
+            let owned: Vec<&str> = args.iter().filter(|arg| matches!(arg, Cow::Owned(_))).map(|arg| &**arg).collect();
+            assert_eq!(owned, ["70"], "only the run-time quality may be allocated");
+        }
+    }
+
+    #[test]
+    fn the_capacity_hint_equals_the_longest_vector_so_construction_never_reallocates() {
+        let longest = all_jobs().iter().map(|job| job.args().len()).max().unwrap();
+        assert_eq!(longest, ARGS_CAPACITY, "the hint must stay tight as arguments are added or removed");
+        for job in all_jobs() {
+            let args = job.args();
+            assert_eq!(args.capacity(), ARGS_CAPACITY, "{job:?} outgrew its up-front allocation");
+        }
+    }
+
+    #[test]
+    fn the_spelled_out_lossless_quality_matches_the_constant() {
+        assert_eq!(LOSSLESS_QUALITY_ARG, IMAGE_QUALITY_MAX.to_string());
+    }
+
+    #[test]
+    fn every_pinned_input_names_its_own_coder_and_selects_the_first_frame() {
+        let expected = [
+            (InputFormat::Png, "png:-[0]"),
+            (InputFormat::Jpeg, "jpeg:-[0]"),
+            (InputFormat::Gif, "gif:-[0]"),
+            (InputFormat::Webp, "webp:-[0]"),
+            (InputFormat::Bmp, "bmp:-[0]"),
+        ];
+        for (input, token) in expected {
+            assert_eq!(input.pinned_input(), token);
+            assert!(owned_args(&Transcode { input, output: OutputFormat::Png }).iter().any(|a| a == token));
+        }
+    }
+
     #[test]
     fn args_apply_limits_before_the_pinned_input_then_strip_then_encode() {
         let job = Transcode { input: InputFormat::Jpeg, output: lossy(70) };
-        let args = job.args();
+        let args = owned_args(&job);
         let pos = |needle: &str| args.iter().position(|a| a == needle).unwrap();
 
         for name in ["width", "height", "memory", "map", "disk", "time"] {
@@ -346,7 +435,7 @@ mod tests {
 
     #[test]
     fn args_for_png_output_pin_no_webp_settings() {
-        let args = Transcode { input: InputFormat::Png, output: OutputFormat::Png }.args();
+        let args = owned_args(&Transcode { input: InputFormat::Png, output: OutputFormat::Png });
         assert_eq!(args.last().map(String::as_str), Some("png:-"));
         assert!(args.iter().all(|a| !a.contains("webp")));
         assert!(args.iter().any(|a| a == "-strip"));
@@ -354,7 +443,7 @@ mod tests {
 
     #[test]
     fn lossless_webp_args_ignore_quality_and_pin_the_exact_setting() {
-        let args = Transcode { input: InputFormat::Png, output: OutputFormat::WebpLossless }.args();
+        let args = owned_args(&Transcode { input: InputFormat::Png, output: OutputFormat::WebpLossless });
         assert!(args.windows(2).any(|w| w == ["-define", "webp:lossless=true"]));
         assert!(args.windows(2).any(|w| w == ["-quality", "100"]), "only quality 100 is bit-exact");
         assert_eq!(args.last().map(String::as_str), Some("webp:-"));
@@ -372,8 +461,8 @@ mod tests {
 
     #[test]
     fn extreme_quality_values_reach_magick_already_clamped() {
-        let low = Transcode { input: InputFormat::Png, output: lossy(0) }.args();
-        let high = Transcode { input: InputFormat::Png, output: lossy(255) }.args();
+        let low = owned_args(&Transcode { input: InputFormat::Png, output: lossy(0) });
+        let high = owned_args(&Transcode { input: InputFormat::Png, output: lossy(255) });
         assert!(low.windows(2).any(|w| w == ["-quality", "1"]));
         assert!(high.windows(2).any(|w| w == ["-quality", "100"]));
     }
