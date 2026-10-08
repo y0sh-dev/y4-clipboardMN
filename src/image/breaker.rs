@@ -143,10 +143,23 @@ impl CircuitBreaker {
     }
 }
 
+/// Explicit outcome reported when resolving a [`Permit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermitOutcome {
+    /// Conversion succeeded and verified valid.
+    Success,
+    /// Conversion failed due to a genuine converter fault.
+    Failure,
+    /// Non-converter error or cancelled attempt (leaves counters neutral).
+    Release,
+}
+
 /// One admitted conversion attempt. It must be resolved with
-/// [`Permit::success`], [`Permit::failure`] or [`Permit::release`]; dropping
-/// it unresolved (a bug, or a thread dying mid-conversion) counts as a
-/// failure, so an abandoned canary can never wedge the breaker in `HalfOpen`.
+/// [`Permit::resolve`], [`Permit::success`], [`Permit::failure`] or [`Permit::release`].
+///
+/// Dropping it unresolved (e.g. an early return, error exit, or panic)
+/// automatically records an [`Outcome::Failure`] as a safety net, guaranteeing
+/// that an abandoned canary probe can never wedge the breaker in `HalfOpen`.
 #[must_use = "an unresolved permit is recorded as a failure"]
 pub struct Permit<'a> {
     breaker: &'a CircuitBreaker,
@@ -162,6 +175,22 @@ impl<'a> Permit<'a> {
     /// True for the single half-open probe.
     pub fn is_canary(&self) -> bool {
         self.canary
+    }
+
+    /// Resolves the permit with an explicit [`PermitOutcome`].
+    /// Returns `(tripped, recovered)`.
+    pub fn resolve(self, outcome: PermitOutcome) -> (bool, bool) {
+        self.resolve_at(outcome, Instant::now())
+    }
+
+    /// Resolves the permit at a specific `Instant` (useful for deterministic tests).
+    pub fn resolve_at(self, outcome: PermitOutcome, now: Instant) -> (bool, bool) {
+        let internal = match outcome {
+            PermitOutcome::Success => Outcome::Success,
+            PermitOutcome::Failure => Outcome::Failure,
+            PermitOutcome::Release => Outcome::Neutral,
+        };
+        self.finish(internal, now)
     }
 
     /// Reports a healthy attempt. Returns true if it closed an open circuit.
@@ -381,5 +410,21 @@ mod tests {
             handles.into_iter().map(|h| h.join().unwrap()).filter(|&got| got).count()
         });
         assert_eq!(admitted, 1);
+    }
+
+    #[test]
+    fn permit_resolve_dispatches_outcomes() {
+        let b = breaker();
+        let (tripped, recovered) = b.acquire().unwrap().resolve(PermitOutcome::Success);
+        assert!(!tripped);
+        assert!(!recovered);
+        assert_eq!(b.state(), BreakerState::Closed);
+
+        // Fail threshold (3) times via resolve(PermitOutcome::Failure)
+        assert!(!b.acquire().unwrap().resolve(PermitOutcome::Failure).0);
+        assert!(!b.acquire().unwrap().resolve(PermitOutcome::Failure).0);
+        let (tripped, _) = b.acquire().unwrap().resolve(PermitOutcome::Failure);
+        assert!(tripped);
+        assert_eq!(b.state(), BreakerState::Open);
     }
 }

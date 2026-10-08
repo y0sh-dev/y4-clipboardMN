@@ -23,7 +23,7 @@ use crate::core::constants::{
     MSG_IMAGE_TOOL_MISSING, log_image_breaker_closed, log_image_breaker_open,
 };
 use crate::core::utils::detect_image_mime;
-use crate::image::breaker::CircuitBreaker;
+use crate::image::breaker::{CircuitBreaker, PermitOutcome};
 use crate::image::magick;
 use crate::image::pipeline::{PipelineError, Transfer};
 use crate::image::transcode::{self, InputFormat, OutputFormat, Quality, Transcode};
@@ -110,27 +110,24 @@ where
     let Some(permit) = breaker.acquire() else { return (mime, payload) };
 
     let mut converted = Vec::new();
-    match convert(Transcode { input, output }, &payload, &mut converted) {
+    let (outcome, result_pair) = match convert(Transcode { input, output }, &payload, &mut converted) {
         Ok(_) if is_valid_output(output, &converted) => {
-            if permit.success() {
-                eprintln!("{}", log_image_breaker_closed());
-            }
-            (output.mime().to_owned(), converted)
+            (PermitOutcome::Success, (output.mime().to_owned(), converted))
         }
         // "Success" that produced no usable file is a converter fault too.
-        Ok(_) => {
-            report_failure(permit.failure());
-            (mime, payload)
-        }
-        Err(error) if is_converter_fault(&error) => {
-            report_failure(permit.failure());
-            (mime, payload)
-        }
-        Err(_) => {
-            permit.release();
-            (mime, payload)
-        }
+        Ok(_) => (PermitOutcome::Failure, (mime, payload)),
+        Err(error) if is_converter_fault(&error) => (PermitOutcome::Failure, (mime, payload)),
+        Err(_) => (PermitOutcome::Release, (mime, payload)),
+    };
+
+    let (tripped, recovered) = permit.resolve(outcome);
+    if recovered {
+        eprintln!("{}", log_image_breaker_closed());
+    } else if tripped {
+        report_failure(true);
     }
+
+    result_pair
 }
 
 fn report_failure(tripped: bool) {
