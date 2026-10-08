@@ -83,6 +83,13 @@ pub const IMAGE_TRANSCODE_TIMEOUT_SECS: u64 = 15;
 // to resume.
 pub const IMAGE_BREAKER_THRESHOLD: u32 = 3;
 pub const IMAGE_BREAKER_COOLDOWN_SECS: u64 = 30;
+// Process throttle around image conversion: at most this many converter
+// processes run at once, so a burst of copied images cannot fork-bomb the
+// machine. A request that finds every slot busy waits up to the wait budget
+// and then stores the image unmodified; saturation is load, not a converter
+// fault, so it never counts towards the circuit breaker.
+pub const IMAGE_CONCURRENCY_LIMIT: usize = 2;
+pub const IMAGE_THROTTLE_WAIT_MS: u64 = 1000;
 
 // Lossy WebP quality used when ingestion re-encodes a JPEG to strip its
 // metadata. JPEG is already lossy, so a lossless WebP would only inflate it;
@@ -229,6 +236,10 @@ pub fn log_image_breaker_open(failures: u32, cooldown_secs: u64) -> String {
 
 pub fn log_image_breaker_closed() -> String {
     format!("{}image conversion recovered; resumed", LOG_INFO)
+}
+
+pub fn log_image_throttled(wait_ms: u64) -> String {
+    format!("{}image converter saturated for {}ms; image saved unmodified", LOG_WARN, wait_ms)
 }
 
 pub fn log_save(mime: &str, size: usize) -> String {
