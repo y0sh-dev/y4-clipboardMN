@@ -9,12 +9,21 @@
 //!
 //! The contract is "never lose data, never make things worse": whatever goes
 //! wrong, the caller still gets back a usable `(mime, bytes)` pair.
+//!
+//! Conversions run behind a [`CircuitBreaker`]: a converter that keeps
+//! failing is skipped for a cooldown instead of being re-spawned per image.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::core::constants::{IMAGE_INGEST_JPEG_QUALITY, LOG_WARN, MSG_IMAGE_TOOL_MISSING};
+use std::time::Duration;
+
+use crate::core::constants::{
+    IMAGE_BREAKER_COOLDOWN_SECS, IMAGE_BREAKER_THRESHOLD, IMAGE_INGEST_JPEG_QUALITY, LOG_WARN,
+    MSG_IMAGE_TOOL_MISSING, log_image_breaker_closed, log_image_breaker_open,
+};
 use crate::core::utils::detect_image_mime;
+use crate::image::breaker::CircuitBreaker;
 use crate::image::magick;
 use crate::image::pipeline::{PipelineError, Transfer};
 use crate::image::transcode::{self, InputFormat, OutputFormat, Quality, Transcode};
@@ -63,12 +72,30 @@ fn is_valid_output(target: OutputFormat, converted: &[u8]) -> bool {
     !converted.is_empty() && detect_image_mime(converted) == Some(target.mime())
 }
 
+/// Whether a failed conversion says something about the converter's health.
+/// Crashes, non-zero exits, deadline overruns and broken pipes do. A missing
+/// tool (`Spawn`) is a different, static condition handled by the
+/// availability probe, and `Source`/`Sink` errors concern the caller's own
+/// streams; counting either would let an unrelated problem open the circuit.
+fn is_converter_fault(error: &PipelineError) -> bool {
+    matches!(
+        error,
+        PipelineError::Failed { .. } | PipelineError::Timeout(_) | PipelineError::Child(_)
+    )
+}
+
 /// Core routing, with the converter injected so every branch — including
 /// "no converter was even invoked" — is deterministic to test.
 ///
 /// Returns `(mime, bytes)` to persist: the converted pair on success, the
 /// original pair, byte for byte, on bypass or on any failure.
-pub fn route_with<F>(mime: String, payload: Vec<u8>, convert: F) -> (String, Vec<u8>)
+///
+/// Breaker accounting happens only around a real conversion attempt, so the
+/// counters cannot be polluted by what never reaches the converter: payloads
+/// bypassed by classification or policy never touch the breaker, a missing
+/// tool is released neutrally, and while the circuit is open the original is
+/// returned without calling `convert` at all.
+pub fn route_with<F>(mime: String, payload: Vec<u8>, breaker: &CircuitBreaker, convert: F) -> (String, Vec<u8>)
 where
     F: FnOnce(Transcode, &[u8], &mut Vec<u8>) -> Result<Transfer, PipelineError>,
 {
@@ -80,14 +107,40 @@ where
     let Some(input) = classify(&mime, &payload) else { return (mime, payload) };
     let Some(output) = ingest_target(input) else { return (mime, payload) };
 
+    let Some(permit) = breaker.acquire() else { return (mime, payload) };
+
     let mut converted = Vec::new();
     match convert(Transcode { input, output }, &payload, &mut converted) {
-        Ok(_) if is_valid_output(output, &converted) => (output.mime().to_owned(), converted),
-        _ => (mime, payload),
+        Ok(_) if is_valid_output(output, &converted) => {
+            if permit.success() {
+                eprintln!("{}", log_image_breaker_closed());
+            }
+            (output.mime().to_owned(), converted)
+        }
+        // "Success" that produced no usable file is a converter fault too.
+        Ok(_) => {
+            report_failure(permit.failure());
+            (mime, payload)
+        }
+        Err(error) if is_converter_fault(&error) => {
+            report_failure(permit.failure());
+            (mime, payload)
+        }
+        Err(_) => {
+            permit.release();
+            (mime, payload)
+        }
     }
 }
 
-/// Ingestion entry point: [`route_with`] backed by the real `magick`.
+fn report_failure(tripped: bool) {
+    if tripped {
+        eprintln!("{}", log_image_breaker_open(IMAGE_BREAKER_THRESHOLD, IMAGE_BREAKER_COOLDOWN_SECS));
+    }
+}
+
+/// Ingestion entry point: [`route_with`] backed by the real `magick` and the
+/// process-wide breaker.
 ///
 /// `magick` is only probed (and only spawned) once a payload has been
 /// classified as a convertible raster image, so text, HTML, SVG and URI
@@ -95,8 +148,10 @@ where
 /// per process and images are stored unmodified.
 pub fn route_for_ingest(mime: String, payload: Vec<u8>) -> (String, Vec<u8>) {
     static WARNED: AtomicBool = AtomicBool::new(false);
+    static BREAKER: CircuitBreaker =
+        CircuitBreaker::new(IMAGE_BREAKER_THRESHOLD, Duration::from_secs(IMAGE_BREAKER_COOLDOWN_SECS));
 
-    route_with(mime, payload, |job, input, output| {
+    route_with(mime, payload, &BREAKER, |job, input, output| {
         if !magick::is_available() {
             if !WARNED.swap(true, Ordering::Relaxed) {
                 eprintln!("{}{}", LOG_WARN, MSG_IMAGE_TOOL_MISSING);
@@ -113,6 +168,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::io::empty;
+    use crate::image::breaker::BreakerState;
 
     fn magick_or_skip() -> bool {
         if magick::is_available() {
@@ -145,15 +201,20 @@ mod tests {
         data
     }
 
-    /// Runs `route_with` with a converter that records how it was called and
-    /// answers with `reply`.
-    fn route_recording(
+    fn fresh_breaker() -> CircuitBreaker {
+        CircuitBreaker::new(3, Duration::from_secs(30))
+    }
+
+    /// Runs `route_with` on `breaker` with a converter that records how it
+    /// was called and answers with `reply`.
+    fn route_on(
+        breaker: &CircuitBreaker,
         mime: &str,
         payload: Vec<u8>,
         reply: Result<Vec<u8>, PipelineError>,
     ) -> ((String, Vec<u8>), Option<Transcode>) {
         let called = Cell::new(None);
-        let routed = route_with(mime.to_owned(), payload, |job, _, out| {
+        let routed = route_with(mime.to_owned(), payload, breaker, |job, _, out| {
             called.set(Some(job));
             let bytes = reply?;
             let len = bytes.len() as u64;
@@ -161,6 +222,19 @@ mod tests {
             Ok(Transfer { bytes_in: 0, bytes_out: len })
         });
         (routed, called.get())
+    }
+
+    /// Same, on a throwaway breaker (for tests that are not about the breaker).
+    fn route_recording(
+        mime: &str,
+        payload: Vec<u8>,
+        reply: Result<Vec<u8>, PipelineError>,
+    ) -> ((String, Vec<u8>), Option<Transcode>) {
+        route_on(&fresh_breaker(), mime, payload, reply)
+    }
+
+    fn png_header() -> Vec<u8> {
+        vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]
     }
 
     fn failed() -> PipelineError {
@@ -331,5 +405,167 @@ mod tests {
             let routed = route_for_ingest(mime.to_owned(), payload.clone());
             assert_eq!(routed, (mime.to_owned(), payload));
         }
+    }
+
+    // --- circuit breaker integration ---
+
+    fn trip(breaker: &CircuitBreaker) {
+        for _ in 0..3 {
+            let (routed, called) = route_on(breaker, "image/png", png_header(), Err(failed()));
+            assert!(called.is_some());
+            assert_eq!(routed.1, png_header());
+        }
+        assert_eq!(breaker.state(), BreakerState::Open);
+    }
+
+    #[test]
+    fn three_consecutive_failures_open_the_circuit_and_later_images_skip_the_converter() {
+        let breaker = fresh_breaker();
+        trip(&breaker);
+
+        // Open: the converter is not even invoked, and the original is kept.
+        let (routed, called) = route_on(&breaker, "image/png", png_header(), Ok(fake_webp()));
+        assert!(called.is_none(), "no conversion (hence no child process) while open");
+        assert_eq!(routed, ("image/png".to_owned(), png_header()));
+    }
+
+    #[test]
+    fn every_kind_of_converter_fault_counts_toward_the_threshold() {
+        let faults: Vec<Result<Vec<u8>, PipelineError>> = vec![
+            Err(failed()),
+            Err(PipelineError::Failed { code: None, stderr: "killed".into() }),
+            Err(PipelineError::Timeout(Duration::from_secs(15))),
+            Err(PipelineError::Child(io::Error::from(io::ErrorKind::BrokenPipe))),
+            Ok(Vec::new()),
+            Ok(b"not an image".to_vec()),
+        ];
+        for fault in faults {
+            let breaker = CircuitBreaker::new(1, Duration::from_secs(30));
+            let (routed, _) = route_on(&breaker, "image/png", png_header(), fault);
+            assert_eq!(routed, ("image/png".to_owned(), png_header()), "zero data loss");
+            assert_eq!(breaker.state(), BreakerState::Open);
+        }
+    }
+
+    #[test]
+    fn bypassed_payloads_neither_advance_nor_reset_the_failure_count() {
+        let breaker = fresh_breaker();
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        for _ in 0..20 {
+            route_on(&breaker, "text/plain", b"hello".to_vec(), Err(failed()));
+            route_on(&breaker, "image/svg+xml", b"<svg/>".to_vec(), Err(failed()));
+            route_on(&breaker, "text/uri-list", b"/a".to_vec(), Err(failed()));
+            route_on(&breaker, "image/gif", b"GIF89a....".to_vec(), Err(failed()));
+        }
+        assert_eq!(breaker.state(), BreakerState::Closed, "bypasses must not count as failures");
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        assert_eq!(breaker.state(), BreakerState::Open, "bypasses must not have reset the count either");
+    }
+
+    #[test]
+    fn a_missing_tool_and_caller_stream_errors_do_not_touch_the_counters() {
+        let breaker = fresh_breaker();
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        for _ in 0..20 {
+            let missing = PipelineError::Spawn(io::Error::from(io::ErrorKind::NotFound));
+            route_on(&breaker, "image/png", png_header(), Err(missing));
+            route_on(&breaker, "image/png", png_header(), Err(PipelineError::Source(io::Error::other("x"))));
+            route_on(&breaker, "image/png", png_header(), Err(PipelineError::Sink(io::Error::other("x"))));
+        }
+        assert_eq!(breaker.state(), BreakerState::Closed);
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        assert_eq!(breaker.state(), BreakerState::Open, "third real fault still trips: nothing was reset");
+    }
+
+    #[test]
+    fn a_missing_tool_alone_can_never_open_the_circuit() {
+        let breaker = fresh_breaker();
+        for _ in 0..50 {
+            let missing = PipelineError::Spawn(io::Error::from(io::ErrorKind::NotFound));
+            let (routed, _) = route_on(&breaker, "image/png", png_header(), Err(missing));
+            assert_eq!(routed, ("image/png".to_owned(), png_header()));
+        }
+        assert_eq!(breaker.state(), BreakerState::Closed);
+    }
+
+    #[test]
+    fn a_successful_conversion_resets_the_consecutive_count() {
+        let breaker = fresh_breaker();
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        let (routed, _) = route_on(&breaker, "image/png", png_header(), Ok(fake_webp()));
+        assert_eq!(routed.0, "image/webp");
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        route_on(&breaker, "image/png", png_header(), Err(failed()));
+        assert_eq!(breaker.state(), BreakerState::Closed);
+    }
+
+    #[test]
+    fn after_the_cooldown_a_successful_canary_conversion_closes_the_circuit() {
+        let breaker = CircuitBreaker::new(3, Duration::from_millis(40));
+        trip(&breaker);
+        std::thread::sleep(Duration::from_millis(60));
+
+        let (routed, called) = route_on(&breaker, "image/png", png_header(), Ok(fake_webp()));
+        assert!(called.is_some(), "the canary must actually be attempted");
+        assert_eq!(routed, ("image/webp".to_owned(), fake_webp()));
+        assert_eq!(breaker.state(), BreakerState::Closed);
+
+        let (routed, called) = route_on(&breaker, "image/png", png_header(), Ok(fake_webp()));
+        assert!(called.is_some());
+        assert_eq!(routed.0, "image/webp", "normal service resumed");
+    }
+
+    #[test]
+    fn a_failed_canary_keeps_the_data_and_reopens_the_circuit() {
+        let breaker = CircuitBreaker::new(3, Duration::from_millis(40));
+        trip(&breaker);
+        std::thread::sleep(Duration::from_millis(60));
+
+        let (routed, called) = route_on(&breaker, "image/png", png_header(), Err(failed()));
+        assert!(called.is_some());
+        assert_eq!(routed, ("image/png".to_owned(), png_header()));
+        assert_eq!(breaker.state(), BreakerState::Open);
+
+        let (_, called) = route_on(&breaker, "image/png", png_header(), Ok(fake_webp()));
+        assert!(called.is_none(), "back in cooldown");
+    }
+
+    #[test]
+    fn only_one_image_is_converted_while_the_canary_is_in_flight() {
+        let breaker = CircuitBreaker::new(3, Duration::ZERO);
+        trip(&breaker);
+
+        let nested_called = Cell::new(false);
+        let outer = route_with("image/png".to_owned(), png_header(), &breaker, |_, _, out| {
+            // While this canary is running, a second image arrives.
+            let (inner, called) = route_on(&breaker, "image/png", png_header(), Ok(fake_webp()));
+            nested_called.set(called.is_some());
+            assert_eq!(inner, ("image/png".to_owned(), png_header()), "bypassed with the original intact");
+            *out = fake_webp();
+            Ok(Transfer { bytes_in: 0, bytes_out: out.len() as u64 })
+        });
+        assert!(!nested_called.get(), "the second image must not start a second probe");
+        assert_eq!(outer.0, "image/webp");
+        assert_eq!(breaker.state(), BreakerState::Closed);
+    }
+
+    // --- real magick behind the breaker ---
+
+    #[test]
+    fn real_corrupt_images_trip_the_breaker_without_losing_a_single_byte() {
+        if !magick_or_skip() { return; }
+        let breaker = fresh_breaker();
+        let mut corrupt = png_header();
+        corrupt.extend_from_slice(&[0xA5; 2048]);
+        for _ in 0..5 {
+            let routed = route_with("image/png".to_owned(), corrupt.clone(), &breaker, |job, input, out| {
+                crate::image::transcode::transcode(job, input, out)
+            });
+            assert_eq!(routed, ("image/png".to_owned(), corrupt.clone()));
+        }
+        assert_eq!(breaker.state(), BreakerState::Open);
     }
 }
