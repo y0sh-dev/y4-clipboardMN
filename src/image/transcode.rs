@@ -12,11 +12,12 @@
 //! through clipboard-controlled data.
 
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use crate::core::constants::{
     IMAGE_LIMIT_DISK, IMAGE_LIMIT_HEIGHT_PX, IMAGE_LIMIT_MAP, IMAGE_LIMIT_MEMORY,
     IMAGE_LIMIT_TIME_SECS, IMAGE_LIMIT_WIDTH_PX, IMAGE_QUALITY_DEFAULT, IMAGE_QUALITY_MAX,
-    IMAGE_QUALITY_MIN,
+    IMAGE_QUALITY_MIN, IMAGE_TRANSCODE_TIMEOUT_SECS,
 };
 use crate::core::utils::{detect_image_mime, mime_base};
 use crate::image::magick;
@@ -187,7 +188,9 @@ impl Transcode {
 ///
 /// A payload that does not decode as `job.input` (corrupt, truncated,
 /// mislabelled, or over the resource limits) ends as
-/// [`PipelineError::Failed`]; a missing `magick` ends as
+/// [`PipelineError::Failed`]; a `magick` that hangs is killed after
+/// `IMAGE_TRANSCODE_TIMEOUT_SECS` of wall-clock time and ends as
+/// [`PipelineError::Timeout`]; a missing `magick` ends as
 /// [`PipelineError::Spawn`] (`is_unavailable()`), the cue to keep the
 /// original bytes untouched instead.
 pub fn transcode<R, W>(job: Transcode, input: R, output: &mut W) -> Result<Transfer, PipelineError>
@@ -197,7 +200,7 @@ where
 {
     let args = job.args();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    magick::run(&refs, input, output)
+    magick::run_with_timeout(&refs, input, output, Duration::from_secs(IMAGE_TRANSCODE_TIMEOUT_SECS))
 }
 
 #[cfg(test)]

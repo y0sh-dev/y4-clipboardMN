@@ -6,6 +6,7 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::core::constants::MAGICK_PROGRAM;
 use crate::image::pipeline::{self, PipelineError, Transfer};
@@ -52,6 +53,16 @@ where
     W: Write,
 {
     pipeline::run_filter(MAGICK_PROGRAM, args, input, output)
+}
+
+/// [`run`] under a wall-clock budget: a `magick` that hangs past `timeout`
+/// is killed and the call ends with [`PipelineError::Timeout`].
+pub fn run_with_timeout<R, W>(args: &[&str], input: R, output: &mut W, timeout: Duration) -> Result<Transfer, PipelineError>
+where
+    R: Read + Send,
+    W: Write,
+{
+    pipeline::run_filter_timeout(MAGICK_PROGRAM, args, input, output, timeout)
 }
 
 #[cfg(test)]
