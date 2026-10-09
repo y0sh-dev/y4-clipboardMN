@@ -13,9 +13,9 @@ This document complements the global protocol (`~/.claude/CLAUDE.md`) and define
 
 1. **NO DIRECT MODIFICATIONS TO PRODUCTION REPOSITORY**:
    - You MUST NOT create, edit, modify, or delete any files in the production workspace:
-     `PRODUCTION (READ-ONLY FOR YOU): /home/yukkkk1/Documents/Projects/Personal/yukkkk1-lab/y4p-rs/`
+     `PRODUCTION (READ-ONLY FOR YOU): ~/Documents/Projects/Personal/yukkkk1-lab/y4p-rs/`
    - ALL code changes, file creations, and command executions MUST be restricted strictly to your Trialspace:
-     `YOUR ISOLATED WORKSPACE: /home/yukkkk1/Documents/Projects/Trialspace/CLAUDE/y4p-rs/`
+     `YOUR ISOLATED WORKSPACE: ~/Documents/Projects/Trialspace/CLAUDE/y4p-rs/`
    - Always verify that file paths passed to editing/writing tools reside inside the Trialspace path.
 
 2. **PROTECTED BRANCH AND AUTONOMOUS VCS RESTRICTIONS**:
@@ -90,7 +90,9 @@ Both checks must pass with zero errors and zero warnings before presenting work 
    - Verification status (`check.sh` result)
    - Next immediate action
 5. **Cross-Trialspace Status Inspection (Read-Only)**:
-   - When collaborating or resuming after a session transition, you are permitted and encouraged to inspect Gemini's status file (`/home/yukkkk1/Documents/Projects/Trialspace/GEMINI/{Project_name}/status.md`) in **read-only mode** to understand recent context, test results, and peer handoffs.
+   - When collaborating or resuming after a session transition, you are permitted and encouraged to inspect Gemini's status file (`~/Documents/Projects/Trialspace/GEMINI/{Project_name}/status.md`) in **read-only mode** to understand recent context, test results, and peer handoffs.
    - Do NOT create, modify, or delete files in Gemini's Trialspace.
-6. **Staggered Cleanup Lifecycle**:
-   - Do NOT clear context at the same time as AGY (Gemini). Ensure the latest state is captured in `status.md` before executing `/clear`.
+6. **Session Clear & Transition Lifecycle**:
+   - Context clears (`/clear`) are unified strictly to **after an official `0.N.0` release is completed**. Mid-cycle clears are abolished.
+   - Prior to release clearing, a roadmap for the subsequent release (`0.(N+1).0`) must be constructed through explicit discussion with the human supervisor (autonomous generation without human alignment is strictly forbidden).
+   - Upon session initialization/clear, regardless of the initial prompt content, you MUST begin by executing a mandatory baseline ground truth survey (inspect git status, branch, check.sh, and status.md).
