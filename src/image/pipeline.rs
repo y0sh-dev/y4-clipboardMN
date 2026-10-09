@@ -183,7 +183,7 @@ pub fn try_splice<S: AsFd, D: AsFd>(src: &S, dst: &D, len: usize) -> io::Result<
         let error = io::Error::last_os_error();
         match error.raw_os_error() {
             Some(libc::EINTR) => continue,
-            Some(libc::EINVAL | libc::ENOSYS) => return Ok(None),
+            Some(libc::EINVAL) | Some(libc::ENOSYS) => return Ok(None),
             _ => return Err(error),
         }
     }
