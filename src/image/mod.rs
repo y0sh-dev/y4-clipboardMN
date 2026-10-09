@@ -19,5 +19,6 @@ pub mod breaker;
 pub mod magick;
 pub mod pipeline;
 pub mod route;
+pub mod sandbox;
 pub mod throttle;
 pub mod transcode;
