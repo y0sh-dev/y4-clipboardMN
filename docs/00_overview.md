@@ -103,4 +103,5 @@ Pick the row that matches what's actually on your mind. Each one is a self-conta
 | Why every database write funnels through one worker thread, and how `open_read_only` moves the single-writer rule from convention to something SQLite itself enforces | [03 — Concurrency & Memory Reclamation](03_concurrency_and_memory.md) |
 | Why display order (MRU) and identity (stable ID) are deliberately two different numbers, why a window function was eliminated from search, why `--raw` output is an unbreakable API contract, why negative indices are rejected outright, and why the CLI treats an unrecognized flag as an error, never a guess | [04 — Stable IDs & the Strict CLI](04_strict_cli_and_stable_id.md) |
 | How clipboard ingress filters sensitive hints and MIME types, and how egress serves stored payloads back out via zero-copy `sendfile(2)` | [05 — Filter Pipeline & Dynamic Egress](05_filter_pipeline_and_app_rules.md) |
+| How visual assets are validated via magic sniffing, isolated via 0700 scratch sandboxes, and governed by hierarchical timeouts and a self-healing circuit breaker | [06 — Local Image Pipeline & Defense-in-Depth Hardening](06_local_image_pipeline.md) |
 

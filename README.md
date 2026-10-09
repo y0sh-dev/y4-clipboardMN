@@ -13,34 +13,28 @@
 `y4p` is a standalone clipboard manager, built natively for Wayland.
 
 It runs as a single daemon — no separate monitor process, no separate provider process — that watches the clipboard, serves history back out, and persists everything to disk.
+Engineered with strict zero-loss integrity and defense-in-depth resource controls, it seamlessly handles text streams, binary payloads, and high-resolution images with deterministic performance.
 
 </div>
 
 ---
 
-## Compatibility
+## Targets
 
-`y4p` targets **wlroots-based compositors** — Sway, Hyprland, and others built on wlroots.
-
-It depends directly on the `ext-data-control-v1` protocol, rather than any X11 compatibility layer. That's a deliberate choice, not an oversight.
-
-It also means `y4p` will not work on compositors that don't implement this protocol — KWin being the notable example at the time of writing. If you're unsure whether your compositor supports it, check its Wayland protocol list before installing.
+`y4p` targets Wayland compositors that implement the `ext-data-control-v1` protocol natively:
+- **Supported**: wlroots-based compositors (Sway, Hyprland, river, and derivatives).
+- **Unsupported**: Compositors without `ext-data-control-v1` support (e.g. standard GNOME/Mutter, KWin).
 
 ---
 
-## Key Features
+## Features
 
-**Unified Standalone Architecture.**
-One binary. One daemon. Monitoring, serving, and persistence all live in the same process, so there's nothing to keep in sync and nothing to leave behind as a zombie.
-
-**High-Capacity Hybrid Storage.**
-Text and metadata live in a fast, searchable SQLite database. Large binaries — screenshots, GIFs — live in a deduplicated filesystem cache instead. Each stays out of the other's way, even at 70MB+ per item.
-
-**Script-First Stable IDs & Strict CLI.**
-Every record gets an immutable ID, separate from its display position. Combined with a parser that rejects unrecognized flags outright, `y4p` is built to behave predictably inside `fzf`, `rofi`, and shell pipelines — not just at an interactive prompt.
-
-**Zero-Loss Integrity & Pin Protection.**
-History rotation never touches a record you've pinned. It's excluded permanently, no matter how much you copy afterward — and schema migrations are staged so existing history is never rewritten or lost across upgrades.
+- **Unified Daemon**: Single-process architecture managing clipboard monitoring, IPC serving, and disk persistence without external daemon orchestration.
+- **Hybrid Storage**: Fast, searchable SQLite engine for text metadata paired with content-addressed filesystem caching for binary blobs.
+- **Script-First CLI**: Deterministic command interface with immutable entry IDs and strict argument parsing for shell pipeline integration (`fzf`, `rofi`).
+- **Zero-Loss Integrity**: Pinned entries are strictly immune to ring buffer rotation; zero schema corruption across migrations.
+- **Local Image Pipeline**: Bounded concurrency transcode engine with isolated scratch directories, timeout watchdogs, and memory limits.
+- **Robust & Dependency-Free**: Panic-free execution path with zero third-party dependencies outside the Rust standard library and SQLite.
 
 ---
 
@@ -61,19 +55,26 @@ A quick look at what's available. Full flags and examples live in `y4p help`.
 
 ---
 
-## Quick Start
+## Get Started
 
-Build it:
+### Quick Digest
 
 ```bash
+# Clone repository
+git clone https://github.com/y0sh-dev/y4p.git
+cd y4p
+
+# Build and install binary
 cargo build --release
 sudo cp target/release/y4p /usr/local/bin/
-```
 
-Start the daemon:
+# Start background daemon
+y4p daemon &
 
-```bash
-y4p daemon
+# Verify status and store clipboard content
+y4p status
+echo "Wayland native clipboard" | y4p store
+y4p list
 ```
 
 Enable Zsh completions (optional). Add the completions directory to your `fpath` before `compinit`:
@@ -82,11 +83,27 @@ Enable Zsh completions (optional). Add the completions directory to your `fpath`
 fpath+=(/path/to/y4p/completions)
 ```
 
-That's it. For every command, its flags, and its examples, run:
+For every command, its flags, and detailed examples, run:
 
 ```bash
 y4p help
 ```
+
+<details>
+<summary><strong>Verification & Tests</strong></summary>
+
+```bash
+# Run unit and integration tests
+cargo test
+
+# Strict linter checks
+cargo clippy --all-targets -- -D warnings
+
+# Full automated verification suite
+bash scripts/check.sh
+```
+
+</details>
 
 ---
 
@@ -103,14 +120,12 @@ mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/y4p"
 cp y4p.toml.example "${XDG_CONFIG_HOME:-$HOME/.config}/y4p/y4p.toml"
 ```
 
-
 ---
 
-## Architecture & Design
+## Documentation
 
-This README is a quick-start guide, kept intentionally short.
-
-The reasoning behind `y4p`'s internals — why the daemon multiplexes I/O on one thread, how Pin protection interacts with history rotation, why stable IDs exist — lives separately, in [`docs/00_overview.md`](docs/00_overview.md).
+- [`docs/00_overview.md`](docs/00_overview.md) — Architectural overview, single-threaded I/O multiplexing, and ring buffer invariants.
+- [`docs/AI_POLICY.md`](docs/AI_POLICY.md) — Shared policies and guidelines on Generative AI (LLMs) usage.
 
 ---
 
@@ -119,10 +134,3 @@ The reasoning behind `y4p`'s internals — why the daemon multiplexes I/O on one
 GPL-3.0-or-later
 
 Copyright (c) 2026 yosana (y0sh-dev)
-
----
-
-## AI Usage Disclosure
-
-For our policy on using Generative AI (LLMs), please refer to
-the shared guidelines documented in [docs/AI_POLICY.md](docs/AI_POLICY.md).
