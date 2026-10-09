@@ -10,16 +10,25 @@ use std::time::Duration;
 
 use crate::core::constants::MAGICK_PROGRAM;
 use crate::image::pipeline::{self, PipelineError, Transfer};
+use crate::image::sandbox::{self, ScratchDir};
 
 /// True when `program -version` can be spawned and exits successfully.
 ///
 /// Never panics: a missing binary, a non-executable file or a non-zero exit
 /// all collapse to `false`, which is exactly the signal a caller needs to
 /// choose a fallback. All three std streams are nulled so the probe can
-/// neither block on a pipe nor write into the caller's terminal.
+/// neither block on a pipe nor write into the caller's terminal. It runs in
+/// the same sanitised environment as a real conversion, so the answer
+/// describes the tool as conversions will see it.
 pub fn probe(program: &str) -> bool {
-    Command::new(program)
-        .arg("-version")
+    probe_with(program, &["-version"])
+}
+
+fn probe_with(program: &str, args: &[&str]) -> bool {
+    let mut command = Command::new(program);
+    sandbox::child_env(None).apply(&mut command);
+    command
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -46,13 +55,19 @@ pub fn is_available() -> bool {
 /// add a second process spawn plus a check-then-use race. Callers that want
 /// to avoid even attempting the call can gate on [`is_available`] themselves.
 ///
+/// Every run is isolated (see [`sandbox`]): `magick` gets a private scratch
+/// directory for its disk spill and an environment of exactly `PATH` plus the
+/// temp variables, so neither the shared `/tmp` nor the daemon's own
+/// `MAGICK_*` settings can reach it. If no private directory can be made,
+/// nothing is started and the call ends with [`PipelineError::Isolation`].
+///
 /// On `Err`, `output` may hold partial bytes and must be discarded.
 pub fn run<R, W>(args: &[&str], input: R, output: &mut W) -> Result<Transfer, PipelineError>
 where
     R: Read + Send,
     W: Write,
 {
-    pipeline::run_filter(MAGICK_PROGRAM, args, input, output)
+    run_isolated(MAGICK_PROGRAM, sandbox::create_scratch_dir(), args, input, output, None)
 }
 
 /// [`run`] under a wall-clock budget: a `magick` that hangs past `timeout`
@@ -62,7 +77,28 @@ where
     R: Read + Send,
     W: Write,
 {
-    pipeline::run_filter_timeout(MAGICK_PROGRAM, args, input, output, timeout)
+    run_isolated(MAGICK_PROGRAM, sandbox::create_scratch_dir(), args, input, output, Some(timeout))
+}
+
+/// Runs `program` inside `scratch`, which is removed once the child is gone
+/// (the pipeline reaps it, killed or not, before returning). Program and
+/// scratch result are parameters so the environment handed to the child and
+/// the "could not isolate" path are testable without ImageMagick.
+fn run_isolated<R, W>(
+    program: &str,
+    scratch: std::io::Result<ScratchDir>,
+    args: &[&str],
+    input: R,
+    output: &mut W,
+    timeout: Option<Duration>,
+) -> Result<Transfer, PipelineError>
+where
+    R: Read + Send,
+    W: Write,
+{
+    let scratch = scratch.map_err(PipelineError::Isolation)?;
+    let env = sandbox::child_env(Some(scratch.path()));
+    pipeline::run_filter_in_env(program, args, &env, input, output, timeout)
 }
 
 #[cfg(test)]
@@ -176,5 +212,91 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(60))
             .expect("magick pipeline hung on early child exit");
         assert!(matches!(result, Err(PipelineError::Failed { .. })));
+    }
+
+    #[test]
+    fn a_failure_to_isolate_starts_nothing_and_is_reported_as_such() {
+        let refusal = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no private directory");
+        let mut out = Vec::new();
+        let result = run_isolated("env", Err(refusal), &[], empty(), &mut out, None);
+        assert!(matches!(result, Err(PipelineError::Isolation(_))), "{result:?}");
+        assert!(out.is_empty(), "magick must not have run");
+        // A shortage of scratch space says nothing about whether the tool exists.
+        assert!(!result.unwrap_err().is_unavailable());
+    }
+
+    #[test]
+    fn the_child_runs_in_the_scratch_directory_environment_and_nothing_else() {
+        let root = scratch_root("env");
+        let scratch = sandbox::create_scratch_dir_under(&root).unwrap();
+        let inside = scratch.path().to_path_buf();
+
+        let mut out = Vec::new();
+        run_isolated("env", Ok(scratch), &[], empty(), &mut out, None).unwrap();
+        let seen: std::collections::BTreeMap<String, String> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())))
+            .filter(|(key, _)| key != "_" && key != "PWD")
+            .collect();
+
+        let dir = inside.display().to_string();
+        assert_eq!(seen.get("MAGICK_TEMPORARY_PATH"), Some(&dir));
+        assert_eq!(seen.get("TMPDIR"), Some(&dir));
+        let keys: Vec<&str> = seen.keys().map(String::as_str).collect();
+        assert!(keys.iter().all(|key| ["MAGICK_TEMPORARY_PATH", "PATH", "TMPDIR"].contains(key)), "unexpected variables: {keys:?}");
+        assert!(!inside.exists(), "removed once the child is gone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_availability_probe_runs_without_the_inherited_environment() {
+        // `HOME` is set in practically every test environment; the probe must
+        // not pass it on. (Where it is unset the check is vacuously true.)
+        assert!(probe_with("sh", &["-c", "[ -z \"${HOME+x}\" ] && [ -z \"${LD_PRELOAD+x}\" ]"]));
+        // Control: `PATH`, the one variable that is passed on, is really there.
+        assert!(probe_with("sh", &["-c", "[ -n \"${PATH+x}\" ]"]));
+    }
+
+    /// A throwaway root under `target/`, so the real runtime directory is not involved.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("magick-test-tmp")
+            .join(format!("{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn entries_under(root: &std::path::Path) -> usize {
+        // The per-user base directory holds one subdirectory per run.
+        std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .map(|base| std::fs::read_dir(base.path()).unwrap().count())
+            .sum()
+    }
+
+    #[test]
+    fn the_scratch_directory_is_removed_after_success_and_after_failure() {
+        if !magick_or_skip() { return; }
+        let root = scratch_root("cleanup");
+
+        let mut png = Vec::new();
+        let scratch = sandbox::create_scratch_dir_under(&root).unwrap();
+        let inside = scratch.path().to_path_buf();
+        run_isolated(MAGICK_PROGRAM, Ok(scratch), &["-size", "8x8", "xc:red", "png:-"], empty(), &mut png, None).unwrap();
+        assert!(!inside.exists(), "left behind after a successful run");
+        assert_eq!(entries_under(&root), 0);
+
+        let scratch = sandbox::create_scratch_dir_under(&root).unwrap();
+        let inside = scratch.path().to_path_buf();
+        let mut out = Vec::new();
+        let failure = run_isolated(MAGICK_PROGRAM, Ok(scratch), &["png:-", "png:-"], Cursor::new(b"not an image".to_vec()), &mut out, None);
+        assert!(matches!(failure, Err(PipelineError::Failed { .. })), "{failure:?}");
+        assert!(!inside.exists(), "left behind after a failed run");
+        assert_eq!(entries_under(&root), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
