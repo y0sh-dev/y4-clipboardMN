@@ -3,6 +3,7 @@
 
 // src/image/pipeline.rs
 
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
@@ -33,6 +34,10 @@ pub enum PipelineError {
     /// The child outlived its wall-clock budget and was killed (together
     /// with any processes it had spawned). Carries the budget that was exceeded.
     Timeout(Duration),
+    /// The isolated environment the child must run in (a private scratch
+    /// directory) could not be prepared, so nothing was started. Like
+    /// `Spawn` this says nothing about the data or the tool's health.
+    Isolation(io::Error),
 }
 
 impl PipelineError {
@@ -54,11 +59,46 @@ impl fmt::Display for PipelineError {
             Self::Failed { code: Some(code), stderr } => write!(f, "external process exited with status {code}: {stderr}"),
             Self::Failed { code: None, stderr } => write!(f, "external process was terminated by a signal: {stderr}"),
             Self::Timeout(limit) => write!(f, "external process exceeded its {}s time limit and was killed", limit.as_secs_f64()),
+            Self::Isolation(e) => write!(f, "failed to prepare an isolated environment for the external process: {e}"),
         }
     }
 }
 
 impl std::error::Error for PipelineError {}
+
+/// The complete environment a child runs with. Applying it first discards
+/// every inherited variable, then sets exactly the listed ones, so nothing in
+/// the daemon's own environment (`MAGICK_CONFIGURE_PATH`, `LD_PRELOAD`,
+/// `HOME`, ...) can steer how the child loads configuration or code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChildEnv {
+    vars: Vec<(OsString, OsString)>,
+}
+
+impl ChildEnv {
+    /// An empty environment: the child sees no variables at all.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds (or replaces) one variable.
+    pub fn set(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        let (key, value) = (key.into(), value.into());
+        self.vars.retain(|(existing, _)| *existing != key);
+        self.vars.push((key, value));
+        self
+    }
+
+    pub fn vars(&self) -> &[(OsString, OsString)] {
+        &self.vars
+    }
+
+    /// Replaces `command`'s environment with this one.
+    pub fn apply(&self, command: &mut Command) {
+        command.env_clear();
+        command.envs(self.vars.iter().map(|(key, value)| (key, value)));
+    }
+}
 
 /// Byte counts of a completed run. `bytes_in` counts what the child
 /// accepted on stdin, which is less than the input's length if the child
@@ -356,7 +396,7 @@ where
     R: Read + Send,
     W: Write,
 {
-    run_filter_inner(program, args, input, output, None)
+    run_filter_inner(program, args, None, input, output, None)
 }
 
 /// [`run_filter`] with a wall-clock budget. If the child (or anything it
@@ -378,12 +418,17 @@ where
     R: Read + Send,
     W: Write,
 {
-    run_filter_inner(program, args, input, output, Some(timeout))
+    run_filter_inner(program, args, None, input, output, Some(timeout))
 }
 
-fn run_filter_inner<R, W>(
+/// [`run_filter`] / [`run_filter_timeout`] in a controlled environment: the
+/// child gets exactly `env` and nothing inherited (a `timeout` of `None`
+/// means no deadline). Everything else, including the failure semantics,
+/// is identical.
+pub fn run_filter_in_env<R, W>(
     program: &str,
     args: &[&str],
+    env: &ChildEnv,
     input: R,
     output: &mut W,
     timeout: Option<Duration>,
@@ -392,8 +437,27 @@ where
     R: Read + Send,
     W: Write,
 {
-    let mut child = Command::new(program)
-        .args(args)
+    run_filter_inner(program, args, Some(env), input, output, timeout)
+}
+
+fn run_filter_inner<R, W>(
+    program: &str,
+    args: &[&str],
+    env: Option<&ChildEnv>,
+    input: R,
+    output: &mut W,
+    timeout: Option<Duration>,
+) -> Result<Transfer, PipelineError>
+where
+    R: Read + Send,
+    W: Write,
+{
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(env) = env {
+        env.apply(&mut command);
+    }
+    let mut child = command
         // Own process group, so a kill can reach the whole process tree.
         .process_group(0)
         .stdin(Stdio::piped())
