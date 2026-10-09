@@ -24,7 +24,8 @@ use std::time::Duration;
 use crate::core::constants::{
     IMAGE_BREAKER_COOLDOWN_SECS, IMAGE_BREAKER_THRESHOLD, IMAGE_CONCURRENCY_LIMIT,
     IMAGE_INGEST_JPEG_QUALITY, IMAGE_OUTPUT_HINT_CAP_BYTES, IMAGE_THROTTLE_WAIT_MS, LOG_WARN,
-    MSG_IMAGE_TOOL_MISSING, log_image_breaker_closed, log_image_breaker_open, log_image_throttled,
+    MSG_IMAGE_TOOL_MISSING, log_image_breaker_closed, log_image_breaker_open,
+    log_image_scratch_unavailable, log_image_throttled,
 };
 use crate::core::utils::detect_image_mime;
 use crate::image::breaker::{CircuitBreaker, PermitOutcome};
@@ -80,8 +81,9 @@ fn is_valid_output(target: OutputFormat, converted: &[u8]) -> bool {
 /// Whether a failed conversion says something about the converter's health.
 /// Crashes, non-zero exits, deadline overruns and broken pipes do. A missing
 /// tool (`Spawn`) is a different, static condition handled by the
-/// availability probe, and `Source`/`Sink` errors concern the caller's own
-/// streams; counting either would let an unrelated problem open the circuit.
+/// availability probe, `Isolation` (no private scratch directory) is a
+/// property of the host, and `Source`/`Sink` errors concern the caller's own
+/// streams; counting any of them would let an unrelated problem open the circuit.
 fn is_converter_fault(error: &PipelineError) -> bool {
     matches!(
         error,
@@ -186,9 +188,13 @@ fn duration_ms(duration: Duration) -> u64 {
 /// `magick` is only probed (and only spawned) once a payload has been
 /// classified as a convertible raster image, so text, HTML, SVG and URI
 /// lists never pay for it. When it is missing, a single warning is printed
-/// per process and images are stored unmodified.
+/// per process and images are stored unmodified. The same holds, with its own
+/// single warning, when no private scratch directory can be prepared (see
+/// `image::sandbox`): the converter is then not run at all rather than left to
+/// spill into a shared temp directory.
 pub fn route_for_ingest(mime: String, payload: Vec<u8>) -> (String, Vec<u8>) {
     static WARNED: AtomicBool = AtomicBool::new(false);
+    static WARNED_SCRATCH: AtomicBool = AtomicBool::new(false);
     static BREAKER: CircuitBreaker =
         CircuitBreaker::new(IMAGE_BREAKER_THRESHOLD, Duration::from_secs(IMAGE_BREAKER_COOLDOWN_SECS));
     static THROTTLE: ProcessThrottle =
@@ -201,7 +207,13 @@ pub fn route_for_ingest(mime: String, payload: Vec<u8>) -> (String, Vec<u8>) {
             }
             return Err(PipelineError::Spawn(io::Error::from(io::ErrorKind::NotFound)));
         }
-        transcode::transcode(job, input, output)
+        let result = transcode::transcode(job, input, output);
+        if let Err(PipelineError::Isolation(reason)) = &result
+            && !WARNED_SCRATCH.swap(true, Ordering::Relaxed)
+        {
+            eprintln!("{}", log_image_scratch_unavailable(&reason.to_string()));
+        }
+        result
     })
 }
 
@@ -539,6 +551,19 @@ mod tests {
         assert_eq!(breaker.state(), BreakerState::Closed);
         route_on(&breaker, "image/png", png_header(), Err(failed()));
         assert_eq!(breaker.state(), BreakerState::Open, "third real fault still trips: nothing was reset");
+    }
+
+    #[test]
+    fn failing_to_isolate_is_neutral_and_keeps_the_original() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(30));
+        for _ in 0..20 {
+            let refusal = io::Error::new(io::ErrorKind::PermissionDenied, "no private directory");
+            let (routed, called) =
+                route_on(&breaker, "image/png", png_header(), Err(PipelineError::Isolation(refusal)));
+            assert!(called.is_some());
+            assert_eq!(routed, ("image/png".to_owned(), png_header()), "zero data loss");
+        }
+        assert_eq!(breaker.state(), BreakerState::Closed, "a host problem must not open the circuit");
     }
 
     #[test]

@@ -45,6 +45,13 @@ pub const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 // --- Local Image Pipeline ---
 // External converter executable, resolved through `PATH` (ImageMagick 7).
 pub const MAGICK_PROGRAM: &str = "magick";
+// Private scratch space for the converter's disk spill (`-limit disk`). A
+// per-user directory under `$XDG_RUNTIME_DIR` when that is a private (0700)
+// directory of the current user, otherwise `<SCRATCH_FALLBACK_ROOT>/
+// <SCRATCH_DIR_NAME>-<uid>`; either way created with mode 0700 and verified
+// before use. Each conversion gets its own subdirectory, removed afterwards.
+pub const SCRATCH_DIR_NAME: &str = "y4p-magick";
+pub const SCRATCH_FALLBACK_ROOT: &str = "/tmp";
 // Chunk size for relaying bytes between caller streams and a child's pipes.
 // Matches the default Linux pipe capacity (64KiB) so one read/write pair
 // moves at most one full pipe buffer.
@@ -59,13 +66,17 @@ pub const PIPELINE_STDERR_CAP_BYTES: usize = 8 * 1024;
 // decompression bomb) is rejected or spilled within bounds instead of
 // exhausting memory. Width/height are pixels; 16384 comfortably covers an
 // 8K screenshot (7680x4320). Memory/map/disk are ImageMagick size strings;
-// time is seconds of CPU before the child aborts itself.
+// time is seconds before the child aborts itself. It is the inner layer of a
+// two-layer defence and must stay below `IMAGE_TRANSCODE_TIMEOUT_SECS` (a
+// compile-time assertion in `image::transcode` enforces it): a runaway
+// conversion should end with ImageMagick's own diagnostic, and only a child
+// that ignores its limit (blocked, deadlocked) meets the outer SIGKILL.
 pub const IMAGE_LIMIT_WIDTH_PX: &str = "16384";
 pub const IMAGE_LIMIT_HEIGHT_PX: &str = "16384";
 pub const IMAGE_LIMIT_MEMORY: &str = "256MiB";
 pub const IMAGE_LIMIT_MAP: &str = "512MiB";
 pub const IMAGE_LIMIT_DISK: &str = "1GiB";
-pub const IMAGE_LIMIT_TIME_SECS: &str = "30";
+pub const IMAGE_LIMIT_TIME_SECS: &str = "10";
 // Encoder quality bounds (inclusive) and the default used when a caller has
 // no preference. Out-of-range requests are clamped, never rejected.
 pub const IMAGE_QUALITY_MIN: u8 = 1;
@@ -73,9 +84,10 @@ pub const IMAGE_QUALITY_MAX: u8 = 100;
 pub const IMAGE_QUALITY_DEFAULT: u8 = 80;
 
 // Wall-clock budget for one image transcode. Unlike `IMAGE_LIMIT_TIME_SECS`
-// (ImageMagick's own CPU-time limit, which a blocked or deadlocked process
-// never reaches), this is enforced from outside: the child's whole process
-// group is SIGKILLed when it elapses.
+// (ImageMagick's own limit, which a blocked or deadlocked process never
+// reaches, and which only fires at points where ImageMagick checks it), this
+// is enforced from outside: the child's whole process group is SIGKILLed when
+// it elapses.
 pub const IMAGE_TRANSCODE_TIMEOUT_SECS: u64 = 15;
 // Circuit breaker around image conversion: this many consecutive failures
 // suspend conversion (images are stored unmodified, no process is spawned)
@@ -243,6 +255,10 @@ pub fn log_image_breaker_open(failures: u32, cooldown_secs: u64) -> String {
 
 pub fn log_image_breaker_closed() -> String {
     format!("{}image conversion recovered; resumed", LOG_INFO)
+}
+
+pub fn log_image_scratch_unavailable(reason: &str) -> String {
+    format!("{}no private scratch directory for the image converter ({}); images are saved unmodified, metadata included", LOG_WARN, reason)
 }
 
 pub fn log_image_throttled(wait_ms: u64) -> String {
