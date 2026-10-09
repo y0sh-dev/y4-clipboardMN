@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use crate::core::constants::{
     IMAGE_BREAKER_COOLDOWN_SECS, IMAGE_BREAKER_THRESHOLD, IMAGE_CONCURRENCY_LIMIT,
-    IMAGE_INGEST_JPEG_QUALITY, IMAGE_THROTTLE_WAIT_MS, LOG_WARN, MSG_IMAGE_TOOL_MISSING,
-    log_image_breaker_closed, log_image_breaker_open, log_image_throttled,
+    IMAGE_INGEST_JPEG_QUALITY, IMAGE_OUTPUT_HINT_CAP_BYTES, IMAGE_THROTTLE_WAIT_MS, LOG_WARN,
+    MSG_IMAGE_TOOL_MISSING, log_image_breaker_closed, log_image_breaker_open, log_image_throttled,
 };
 use crate::core::utils::detect_image_mime;
 use crate::image::breaker::{CircuitBreaker, PermitOutcome};
@@ -133,7 +133,7 @@ where
         return (mime, payload);
     };
 
-    let mut converted = Vec::new();
+    let mut converted = Vec::with_capacity(output_capacity_hint(payload.len()));
     let result = convert(Transcode { input, output }, &payload, &mut converted);
     // The process is gone: hand the slot to the next waiter before doing the
     // (cheap, but lock-taking) bookkeeping below.
@@ -163,6 +163,16 @@ fn report_failure(tripped: bool) {
     if tripped {
         eprintln!("{}", log_image_breaker_open(IMAGE_BREAKER_THRESHOLD, IMAGE_BREAKER_COOLDOWN_SECS));
     }
+}
+
+/// How much output buffer to reserve before streaming a conversion of
+/// `input_len` bytes. Without a hint the sink grows by repeated doubling while
+/// the child streams, copying everything written so far at each step; with an
+/// estimate close to the final size that is one allocation. The input length
+/// is that estimate (see `IMAGE_OUTPUT_HINT_CAP_BYTES`), clamped so one huge
+/// input cannot reserve more than the cap.
+fn output_capacity_hint(input_len: usize) -> usize {
+    input_len.min(IMAGE_OUTPUT_HINT_CAP_BYTES)
 }
 
 /// Whole milliseconds for log output, saturating instead of truncating.
@@ -890,5 +900,51 @@ mod tests {
         assert!(peak.load(Ordering::SeqCst) <= LIMIT);
         assert_eq!(breaker.state(), BreakerState::Closed);
         assert_eq!(throttle.in_use(), 0);
+    }
+
+    // --- output buffer capacity hint ---
+
+    #[test]
+    fn the_capacity_hint_follows_the_input_size_up_to_the_cap() {
+        assert_eq!(output_capacity_hint(0), 0);
+        assert_eq!(output_capacity_hint(1), 1);
+        assert_eq!(output_capacity_hint(300_000), 300_000);
+        assert_eq!(output_capacity_hint(IMAGE_OUTPUT_HINT_CAP_BYTES), IMAGE_OUTPUT_HINT_CAP_BYTES);
+        assert_eq!(output_capacity_hint(IMAGE_OUTPUT_HINT_CAP_BYTES + 1), IMAGE_OUTPUT_HINT_CAP_BYTES);
+        assert_eq!(output_capacity_hint(usize::MAX), IMAGE_OUTPUT_HINT_CAP_BYTES);
+    }
+
+    /// Runs a conversion of `payload` whose converter reports the capacity it
+    /// was handed, then fills the buffer up to that capacity and reports
+    /// whether it had to move (i.e. reallocate).
+    fn capacity_seen_by_converter(payload: Vec<u8>) -> (usize, bool) {
+        let seen = Cell::new((0, true));
+        route_with("image/png".to_owned(), payload, &fresh_breaker(), &roomy_throttle(), |_, _, out| {
+            let capacity = out.capacity();
+            let before = out.as_ptr();
+            out.resize(capacity, 0xAB);
+            seen.set((capacity, out.as_ptr() != before));
+            out.clear();
+            Err(failed())
+        });
+        seen.get()
+    }
+
+    #[test]
+    fn the_converter_receives_a_buffer_sized_from_the_input_and_filling_it_never_reallocates() {
+        let mut payload = png_header();
+        payload.resize(200_000, 7);
+        let (capacity, moved) = capacity_seen_by_converter(payload.clone());
+        assert!(capacity >= payload.len(), "reserved {capacity} for a {}-byte input", payload.len());
+        assert!(!moved, "streaming up to the hint must not reallocate");
+    }
+
+    #[test]
+    fn a_huge_input_reserves_no_more_than_the_cap() {
+        let mut payload = png_header();
+        payload.resize(IMAGE_OUTPUT_HINT_CAP_BYTES + 1_000_000, 7);
+        let (capacity, _) = capacity_seen_by_converter(payload);
+        assert!(capacity >= IMAGE_OUTPUT_HINT_CAP_BYTES);
+        assert!(capacity < IMAGE_OUTPUT_HINT_CAP_BYTES + 1_000_000, "reserved {capacity}: the cap was ignored");
     }
 }

@@ -90,6 +90,13 @@ pub const IMAGE_BREAKER_COOLDOWN_SECS: u64 = 30;
 // fault, so it never counts towards the circuit breaker.
 pub const IMAGE_CONCURRENCY_LIMIT: usize = 2;
 pub const IMAGE_THROTTLE_WAIT_MS: u64 = 1000;
+// Upper bound on the output buffer reserved up front for one conversion.
+// Every ingest conversion is compressing (PNG/BMP -> lossless WebP, JPEG ->
+// lossy WebP), so the input size is a sound estimate of the output size; the
+// cap only stops a huge input from reserving address space for an output that
+// will almost certainly be smaller. Outgrowing the hint is harmless (the
+// buffer grows as usual).
+pub const IMAGE_OUTPUT_HINT_CAP_BYTES: usize = 16 * 1024 * 1024;
 
 // Lossy WebP quality used when ingestion re-encodes a JPEG to strip its
 // metadata. JPEG is already lossy, so a lossless WebP would only inflate it;
