@@ -137,6 +137,32 @@ pub struct Transcode {
     pub output: OutputFormat,
 }
 
+/// Parses a plain decimal number of seconds in a `const` context; anything
+/// else yields `u64::MAX`, which makes the assertion below fail loudly.
+const fn parse_secs(text: &str) -> u64 {
+    let mut rest = text.as_bytes();
+    if rest.is_empty() {
+        return u64::MAX;
+    }
+    let mut secs: u64 = 0;
+    while let [digit, tail @ ..] = rest {
+        if !digit.is_ascii_digit() {
+            return u64::MAX;
+        }
+        secs = secs.saturating_mul(10).saturating_add((*digit - b'0') as u64);
+        rest = tail;
+    }
+    secs
+}
+
+// Defence in depth: ImageMagick's own time limit must fire before the outer
+// watchdog, so a runaway conversion ends with the converter's diagnostic and
+// only a child that ignores its limit meets the process-group SIGKILL.
+const _: () = assert!(
+    parse_secs(IMAGE_LIMIT_TIME_SECS) >= 1 && parse_secs(IMAGE_LIMIT_TIME_SECS) < IMAGE_TRANSCODE_TIMEOUT_SECS,
+    "IMAGE_LIMIT_TIME_SECS must be a whole number of seconds below IMAGE_TRANSCODE_TIMEOUT_SECS",
+);
+
 /// Resource ceilings passed to every run as `-limit <name> <value>`.
 const LIMITS: [(&str, &str); 6] = [
     ("width", IMAGE_LIMIT_WIDTH_PX),
@@ -393,6 +419,28 @@ mod tests {
             let args = job.args();
             assert_eq!(args.capacity(), ARGS_CAPACITY, "{job:?} outgrew its up-front allocation");
         }
+    }
+
+    #[test]
+    fn the_internal_time_limit_is_shorter_than_the_outer_watchdog() {
+        let internal = parse_secs(IMAGE_LIMIT_TIME_SECS);
+        assert!((1..IMAGE_TRANSCODE_TIMEOUT_SECS).contains(&internal), "{internal}s vs {IMAGE_TRANSCODE_TIMEOUT_SECS}s");
+        // ...and it is the value that really reaches the command line.
+        let args = owned_args(&Transcode { input: InputFormat::Png, output: OutputFormat::Png });
+        let at = args.iter().position(|a| a == "time").unwrap();
+        assert_eq!(args[at - 1], "-limit");
+        assert_eq!(args[at + 1], internal.to_string());
+    }
+
+    #[test]
+    fn the_seconds_parser_accepts_plain_numbers_and_rejects_everything_else() {
+        assert_eq!(parse_secs("10"), 10);
+        assert_eq!(parse_secs("0"), 0);
+        assert_eq!(parse_secs("007"), 7);
+        for bad in ["", "ten", "10s", "-1", "1.5", " 10", "1e3"] {
+            assert_eq!(parse_secs(bad), u64::MAX, "{bad:?}");
+        }
+        assert_eq!(parse_secs("99999999999999999999999"), u64::MAX, "overflow saturates and fails the assertion");
     }
 
     #[test]
