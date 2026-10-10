@@ -1,7 +1,7 @@
 // Copyright (C) 2026 yosana
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// src/core/mod.rs
+// crates/core/src/lib.rs
 
 pub mod constants;
 pub mod utils;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::core::constants::{DB_DIR_NAME, DB_FILE_NAME, SOCKET_FILE_NAME, ENV_MAX_HISTORY};
+use crate::constants::{DB_DIR_NAME, DB_FILE_NAME, SOCKET_FILE_NAME, ENV_MAX_HISTORY};
 
 pub static SIG_EXIT: AtomicBool = AtomicBool::new(false);
 

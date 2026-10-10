@@ -1,7 +1,7 @@
 // Copyright (C) 2026 yosana
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// src/core/utils.rs
+// crates/core/src/utils.rs
 
 use percent_encoding::percent_decode;
 
@@ -150,7 +150,7 @@ pub fn is_text_like_mime(mime: &str) -> bool {
     }
 
     let base_bytes = base.as_bytes();
-    crate::core::constants::TEXT_LIKE_MIME_HINTS.iter().any(|&hint| {
+    crate::constants::TEXT_LIKE_MIME_HINTS.iter().any(|&hint| {
         let hint_bytes = hint.as_bytes();
         base_bytes.len() >= hint_bytes.len()
             && base_bytes.windows(hint_bytes.len()).any(|w| w.eq_ignore_ascii_case(hint_bytes))

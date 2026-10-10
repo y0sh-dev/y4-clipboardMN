@@ -27,7 +27,7 @@ jobs:
 
       - name: Strict Clippy Audit
         run: |
-          cargo clippy --all-targets -- \
+          cargo clippy --workspace --all-targets -- \
             -D warnings \
             -W clippy::undocumented_unsafe_blocks \
             -W clippy::cast_lossless \
@@ -46,7 +46,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run Headless Test Suite
-        run: cargo test --verbose -- --nocapture
+        run: cargo test --workspace --verbose -- --nocapture
 
   miri:
     name: Miri (Core Utils UB Check)
@@ -63,7 +63,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run Miri on Pure Rust Utils
-        run: cargo miri test --bin y4p core::utils
+        run: cargo miri test -p y4p-core --lib utils
 
   asan:
     name: AddressSanitizer (Memory Safety)
@@ -86,4 +86,4 @@ jobs:
         # -Zbuild-std: the sanitizer must also instrument std itself (libc
         # FFI, allocator) for ASan to see across the crate/std boundary —
         # `-Zsanitizer=address` alone only instruments this crate's own code.
-        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --bin y4p -- --nocapture
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --lib --bins -- --nocapture

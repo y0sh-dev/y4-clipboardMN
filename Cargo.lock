@@ -397,14 +397,22 @@ dependencies = [
 
 [[package]]
 name = "y4p"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ctrlc",
  "libc",
- "percent-encoding",
  "rusqlite",
  "sha3",
  "unicode-width",
  "wayland-client",
  "wayland-protocols",
+ "y4p-core",
+]
+
+[[package]]
+name = "y4p-core"
+version = "0.6.1"
+dependencies = [
+ "libc",
+ "percent-encoding",
 ]

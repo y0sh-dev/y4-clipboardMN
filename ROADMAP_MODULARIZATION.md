@@ -51,7 +51,7 @@ Visual progress checklist across the modularization development cycle:
 - [x] **v0.6.0: Local Image Pipeline (Baseline Release)**
   - Hardened Wayland ingestion, isolated `ScratchDir` sandbox, hierarchical watchdogs, distilled documentation.
 
-- [ ] **v0.6.1: Workspace Foundation & `crates/core` Extraction**
+- [x] **v0.6.1: Workspace Foundation & `crates/core` Extraction**
   - Initialise root `[workspace]` manifest in `Cargo.toml`.
   - Physically extract `src/core/` into `crates/core/` (`y4p-core`).
   - Wire path dependency (`y4p-core = { path = "crates/core" }`) while preserving binary entrypoint in `src/main.rs`.

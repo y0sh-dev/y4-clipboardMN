@@ -1,7 +1,7 @@
 // Copyright (C) 2026 yosana
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// src/core/config.rs
+// crates/core/src/config.rs
 
 //! User configuration loader and lightweight TOML parser.
 //!
@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::constants::DEFAULT_MAX_HISTORY;
+use crate::constants::DEFAULT_MAX_HISTORY;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneralConfig {
@@ -44,7 +44,7 @@ pub struct Config {
 
 impl Config {
     /// `$XDG_CONFIG_HOME/y4p/y4p.toml`, falling back to `~/.config/y4p/y4p.toml`
-    /// when that variable isn't set (mirroring `core::get_db_path`'s own XDG
+    /// when that variable isn't set (mirroring `crate::get_db_path`'s own XDG
     /// fallback chain for consistency).
     pub fn get_config_path() -> PathBuf {
         build_config_path(std::env::var("XDG_CONFIG_HOME").ok().as_deref(), std::env::var("HOME").ok().as_deref())

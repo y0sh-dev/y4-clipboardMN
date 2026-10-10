@@ -1,11 +1,34 @@
-[package]
-name = "y4p"
-version = "0.6.0"
+[workspace]
+# The root package (`y4p`, the binary) is an implicit member. Domain crates
+# are added under `crates/` one milestone at a time (see
+# ROADMAP_MODULARIZATION.md); dependencies flow strictly inward towards `core`.
+members = ["crates/core"]
+resolver = "3"
+
+[workspace.package]
+# Single source of truth: every member inherits these, so a release bump
+# touches exactly one line.
+version = "0.6.1"
 edition = "2024"
-description = "A robust, unified clipboard manager for Wayland with SQLite storage."
 license = "GPL-3.0-or-later"
 
+[workspace.dependencies]
+# Shared by more than one member, pinned once. Crates used by a single member
+# are declared in that member's own manifest instead.
+libc = "0.2.186"
+
+[package]
+name = "y4p"
+version.workspace = true
+edition.workspace = true
+description = "A robust, unified clipboard manager for Wayland with SQLite storage."
+license.workspace = true
+
 [dependencies]
+# --- Workspace Members ---
+# Shared domain types, constants, configuration and XDG path resolution.
+y4p-core = { path = "crates/core" }
+
 # --- Wayland Core ---
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
@@ -17,13 +40,11 @@ rusqlite = { version = "0.40.0", default-features = false, features = ["bundled"
 
 # --- Utilities ---
 # For robust pipe communication and avoiding runtime deadlocks.
-libc = "0.2.186"
+libc.workspace = true
 # For payload deduplication via unique content fingerprints.
 sha3 = "0.12.0"
 # For calculating terminal layout bounds accurately (supports full/half-width).
 unicode-width = "0.2.2"
-# For file path percent-encoding/decoding.
-percent-encoding = "2.3.2"
 # For handling terminal signals (e.g., SIGINT/Ctrl+C).
 ctrlc = "3.5.2"
 
@@ -37,10 +58,12 @@ panic = "abort"
 # y4p is a resident daemon, and this profile's `panic = "abort"` means an
 # unwrap()/expect()/panic! anywhere in its call graph — even inside a
 # spawned worker thread — aborts the *whole* process, not just that thread.
-# Denied crate-wide; `src/cli` (the CLI entry point) and `#[cfg(test)]` code
-# carve out their own `#![allow(...)]`/`#[allow(...)]` overrides where a
-# hard failure or test assertion is actually the correct behavior.
-[lints.clippy]
+# Denied workspace-wide: every member opts in with `[lints] workspace = true`
+# (so the policy cannot drift between crates as more are extracted).
+# `src/cli` (the CLI entry point) and `#[cfg(test)]` code carve out their own
+# `#![allow(...)]`/`#[allow(...)]` overrides where a hard failure or test
+# assertion is actually the correct behavior.
+[workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
@@ -48,3 +71,5 @@ undocumented_unsafe_blocks = "warn"
 cast_lossless = "warn"
 redundant_clone = "warn"
 
+[lints]
+workspace = true
