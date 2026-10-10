@@ -1,0 +1,18 @@
+[package]
+name = "y4p-core"
+version.workspace = true
+edition.workspace = true
+description = "Shared domain types, constants, configuration and XDG path resolution for y4p."
+license.workspace = true
+
+[dependencies]
+# Raw `getuid(2)` for the per-user socket fallback path.
+libc.workspace = true
+# For file path percent-encoding/decoding (`text/uri-list` normalisation).
+percent-encoding = "2.3.2"
+
+# Panic-free policy (`unwrap_used`/`expect_used`/`panic` = deny, plus the
+# unsafe-documentation and clone lints) is defined once in the workspace root
+# and inherited here; see `[workspace.lints.clippy]` in the root manifest.
+[lints]
+workspace = true
