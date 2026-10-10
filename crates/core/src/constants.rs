@@ -1,7 +1,7 @@
 // Copyright (C) 2026 yosana
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// src/core/constants.rs
+// crates/core/src/constants.rs
 
 // --- System & Storage Configuration ---
 pub const DB_DIR_NAME:  &str = "y4p";
@@ -30,7 +30,7 @@ pub const IPC_STATUS_TIMEOUT_MS: u64 = 1000;
 
 // Filename of the IPC control socket. Resolution of the *directory* it lives
 // in (XDG_RUNTIME_DIR preferred, /tmp as a last-resort fallback) is handled
-// by `crate::core::get_socket_path()`, since that decision depends on
+// by `crate::get_socket_path()`, since that decision depends on
 // runtime environment, not just a fixed string.
 pub const SOCKET_FILE_NAME: &str = "y4p.sock";
 

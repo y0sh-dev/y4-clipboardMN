@@ -18,7 +18,11 @@
 
 // src/main.rs
 
-mod core;
+// The domain core lives in the `y4p-core` workspace crate. Aliasing it to
+// `core` keeps every `crate::core::...` path in the sibling modules resolving
+// unchanged (and `src/storage/` byte-for-byte untouched).
+use y4p_core as core;
+
 mod storage;
 mod wayland;
 mod daemon;
